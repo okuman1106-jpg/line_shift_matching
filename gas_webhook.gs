@@ -28,7 +28,7 @@
  */
 
 // ↓↓↓ ここにLINEのチャネルアクセストークン（長期）を貼り付ける ↓↓↓
-const LINE_CHANNEL_ACCESS_TOKEN = "ここにチャネルアクセストークンを貼り付け";
+const LINE_CHANNEL_ACCESS_TOKEN = CLXk6RCC/LWy5AyMsZ9/P4kh9D4WL0SJlodMhhddKExteUe/KY35RZYSGdamvdLTSO+I+Sm/AMtIx+3Yt2qebgbWhaTfdoKlyiSvABbUbhqKD6sxheCHmc3D3WbIet0UljaHvUoBOgDcFNubEEDImQdB04t89/1O/w1cDnyilFU=
 
 // スプレッドシートのシート名（変更していなければそのままでOK）
 const SHEET_NAME_WISH = "希望";
