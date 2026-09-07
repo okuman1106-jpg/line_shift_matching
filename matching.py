@@ -174,3 +174,79 @@ def build_board(wishes_df: pd.DataFrame, confirmed_df: pd.DataFrame,
             labels.loc[site, date] = " / ".join(parts) if parts else "―"
 
     return labels, counts, pendings
+
+
+def _parse_hm_to_minutes(s):
+    """'HH:MM' 形式の文字列を、0時からの分数に変換する。"""
+    h, m = str(s).strip().split(":")
+    return int(h) * 60 + int(m)
+
+
+def expand_to_hour_bands(start_str, end_str):
+    """
+    出勤・退勤（'HH:MM'形式）を受け取り、0〜47時の「通し時間帯」ごとに
+    その時間帯にかかっている分数を返す。
+
+    ダイス表示と同じ考え方：
+      ・1時間ごとのマスに分解し、頭と尻には端数（分）が残る
+      ・終了時刻が開始時刻以下（日またぎ）の場合は、終了側を+24時間して扱う
+        （例：22:00〜翌6:00 → 22:00〜30:00として計算し、22,23,24,25...の
+        マスに分配する）
+      ・各マスの分数を60で割れば、そのマスにおける頭数（1人＝1.0）になる
+
+    戻り値：{時間帯(0〜47の整数): 分数} の辞書
+    """
+    sm = _parse_hm_to_minutes(start_str)
+    em = _parse_hm_to_minutes(end_str)
+    if em <= sm:
+        em += 24 * 60  # 日またぎ
+
+    cells = {}
+    h = sm // 60
+    while h * 60 < em:
+        cell_start = max(sm, h * 60)
+        cell_end = min(em, (h + 1) * 60)
+        minutes = cell_end - cell_start
+        if minutes > 0:
+            cells[h] = cells.get(h, 0) + minutes
+        h += 1
+    return cells
+
+
+def build_hour_breakdown(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
+                          site: str, date: str):
+    """
+    指定した「現場」「日付」について、0〜47時間帯ごとの
+      ・確定人数（確定シフトの実績から）
+      ・希望人数（未処理の希望から）
+    を、それぞれ48個の数値配列（頭数、小数）として返す。
+    """
+    confirmed_heads = [0.0] * 48
+    pending_heads = [0.0] * 48
+
+    if not confirmed_df.empty:
+        rows = confirmed_df[
+            (confirmed_df["現場"] == site) & (confirmed_df["日付"] == date)]
+        for _, r in rows.iterrows():
+            try:
+                cells = expand_to_hour_bands(r["開始"], r["終了"])
+            except Exception:
+                continue
+            for h, minutes in cells.items():
+                if 0 <= h < 48:
+                    confirmed_heads[h] += minutes / 60.0
+
+    if not wishes_df.empty:
+        rows = wishes_df[
+            (wishes_df["第1希望現場"] == site) & (wishes_df["希望日"] == date)
+            & (wishes_df["ステータス"] == "未処理")]
+        for _, r in rows.iterrows():
+            try:
+                cells = expand_to_hour_bands(r["開始"], r["終了"])
+            except Exception:
+                continue
+            for h, minutes in cells.items():
+                if 0 <= h < 48:
+                    pending_heads[h] += minutes / 60.0
+
+    return confirmed_heads, pending_heads
