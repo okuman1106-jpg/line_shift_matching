@@ -22,27 +22,44 @@ st.secrets に以下が設定されていれば「本番モード」（Googleス
   LINE_CHANNEL_ACCESS_TOKEN = "LINEのチャネルアクセストークン"
 """
 import html as html_lib
+from datetime import datetime
 
+import pandas as pd
 import streamlit as st
 
 from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
+    load_reference, save_reference,
 )
-from matching import build_suggestions, build_board, build_hour_breakdown
+from matching import (
+    build_suggestions, build_board, build_hour_breakdown,
+    build_reference_pattern, reference_df_to_array,
+)
 from line_notify import send_confirmation
 
 
-def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_names):
+def guess_col(cols, cands):
+    """列名の一覧から、候補キーワードを含む最初の列を推測する。"""
+    return next((c for c in cols if any(k in c for k in cands)), None)
+
+
+def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_names,
+                        reference_heads=None):
     """
     0〜47時間帯の確定・希望人数を、ダイス表示と同じ考え方（1時間ごとの
-    マス）で、色付きの2行の表として組み立てる。動きがある時間帯の
-    前後だけを表示し、テーブルが無駄に横長にならないようにする。
+    マス）で、色付きの表として組み立てる。動きがある時間帯の前後だけを
+    表示し、テーブルが無駄に横長にならないようにする。
     数字の下に、その時間帯にかかっている人の氏名を小さく添える
     （「そのマスに実際は誰が入っているか」が一目で分かるようにするため）。
+
+    reference_heads … 実績データから作った「お手本ダイス」（48要素）。
+                       指定があれば、確定・希望と並べて一番上に表示し、
+                       見比べながらマッチングを進められるようにする。
     """
+    reference_heads = reference_heads or [0.0] * 48
     active = [h for h in range(48)
-              if confirmed_heads[h] > 0 or pending_heads[h] > 0]
+              if confirmed_heads[h] > 0 or pending_heads[h] > 0 or reference_heads[h] > 0]
     if active:
         lo = max(0, min(active) - 2)
         hi = min(47, max(active) + 2)
@@ -73,6 +90,17 @@ def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_
         parts.append(f'<th style="border:1px solid #ddd;padding:4px 6px;'
                      f'background:#f5f5f5;white-space:nowrap;">{hour_label(h)}</th>')
     parts.append('</tr>')
+
+    if any(v > 0 for v in reference_heads):
+        parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                     'background:#eef2fb;font-weight:bold;white-space:nowrap;'
+                     'vertical-align:top;">お手本</td>')
+        for h in hours:
+            v = reference_heads[h]
+            parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                         f'text-align:center;background:#eef2fb;color:#3355aa;'
+                         f'vertical-align:top;min-width:56px;">{fmt(v)}</td>')
+        parts.append('</tr>')
 
     parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
                  'background:#fafafa;font-weight:bold;white-space:nowrap;'
@@ -194,11 +222,15 @@ if sites_df.empty:
 else:
     st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
 
+    reference_df = load_reference()
+
     st.markdown("#### 🔍 マスをクリックする感覚で、時間帯ごとの内訳を見る")
     st.caption(
         "上の盤面は1日単位の合計人数ですが、こちらは選んだ現場・日付を"
         "1時間刻み（日またぎの勤務は翌日側まで延長）で分解して表示します。"
-        "どの時間帯に人が足りている／足りていないかが分かります。")
+        "「お手本」は、下の「実績データの取り込み」で作成した、この現場の"
+        "いつもの人数パターンです。お手本と見比べながら、少しずつ希望を"
+        "確定に当てはめてください。")
     hc1, hc2 = st.columns(2)
     _drill_site = hc1.selectbox(
         "現場を選択", list(labels.index) if len(labels.index) else [], key="drill_site")
@@ -207,9 +239,65 @@ else:
     if _drill_site and _drill_date:
         _c_heads, _p_heads, _c_names, _p_names = build_hour_breakdown(
             confirmed_df, wishes_df, _drill_site, _drill_date)
+        _ref_heads = reference_df_to_array(reference_df, _drill_site)
         st.markdown(
-            render_hourly_html(_c_heads, _p_heads, _c_names, _p_names),
+            render_hourly_html(_c_heads, _p_heads, _c_names, _p_names, _ref_heads),
             unsafe_allow_html=True)
+
+    with st.expander("📥 実績データの取り込み（お手本ダイスの作成）"):
+        st.caption(
+            "過去（例：直近1週間）の実際の勤怠データ（現場・日付・出勤時刻・"
+            "退勤時刻の列を含むCSV）を取り込むと、その現場の「いつもの人数"
+            "パターン」を自動で計算し、お手本ダイスとして保存します。"
+            "曜日は区別せず、取り込んだ期間全体の1日あたり平均で近似する"
+            "簡易版です（第一弾）。同じ現場を取り込み直すと、内容は最新の"
+            "ものに置き換わります。")
+        actual_file = st.file_uploader(
+            "実績CSV", type=["csv"], key="actual_upload")
+        if actual_file:
+            try:
+                actual_raw = pd.read_csv(actual_file, encoding="utf-8-sig", dtype=str)
+            except UnicodeDecodeError:
+                actual_file.seek(0)
+                actual_raw = pd.read_csv(actual_file, encoding="cp932", dtype=str)
+            actual_cols = list(actual_raw.columns)
+            st.caption(f"{len(actual_raw)} 行 ／ 認識した列：{', '.join(actual_cols[:12])}")
+
+            ac1, ac2, ac3, ac4 = st.columns(4)
+            c_site = ac1.selectbox(
+                "現場の列", actual_cols,
+                index=actual_cols.index(guess_col(actual_cols, ["現場", "事業所", "拠点"]))
+                if guess_col(actual_cols, ["現場", "事業所", "拠点"]) in actual_cols else 0,
+                key="ac_site")
+            c_date = ac2.selectbox(
+                "日付の列", actual_cols,
+                index=actual_cols.index(guess_col(actual_cols, ["日付", "勤務日"]))
+                if guess_col(actual_cols, ["日付", "勤務日"]) in actual_cols else 0,
+                key="ac_date")
+            c_start = ac3.selectbox(
+                "出勤時刻の列", actual_cols,
+                index=actual_cols.index(guess_col(actual_cols, ["出勤", "開始"]))
+                if guess_col(actual_cols, ["出勤", "開始"]) in actual_cols else 0,
+                key="ac_start")
+            c_end = ac4.selectbox(
+                "退勤時刻の列", actual_cols,
+                index=actual_cols.index(guess_col(actual_cols, ["退勤", "終了"]))
+                if guess_col(actual_cols, ["退勤", "終了"]) in actual_cols else 0,
+                key="ac_end")
+
+            if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
+                actual_df = actual_raw.rename(columns={
+                    c_site: "現場", c_date: "日付", c_start: "開始", c_end: "終了",
+                })[["現場", "日付", "開始", "終了"]].dropna()
+                now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
+                target_sites = sorted(actual_df["現場"].dropna().unique())
+                done = 0
+                for s in target_sites:
+                    pattern = build_reference_pattern(actual_df, s)
+                    if pattern and save_reference(s, pattern, now_s):
+                        done += 1
+                st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                st.rerun()
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
