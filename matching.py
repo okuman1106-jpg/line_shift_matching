@@ -217,12 +217,20 @@ def build_hour_breakdown(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
                           site: str, date: str):
     """
     指定した「現場」「日付」について、0〜47時間帯ごとの
-      ・確定人数（確定シフトの実績から）
-      ・希望人数（未処理の希望から）
-    を、それぞれ48個の数値配列（頭数、小数）として返す。
+      ・確定人数／確定している人の氏名（確定シフトの実績から）
+      ・希望人数／希望している人の氏名（未処理の希望から）
+    を返す。
+
+    人数は48個の数値配列（頭数、小数）、氏名はそれぞれの時間帯に対応する
+    48個のリスト（各時間帯にかかっている人の氏名の一覧）として返す。
+    これにより、ダイスの数字マスの中身が「実際は誰なのか」を追跡できる。
+
+    戻り値：(confirmed_heads, pending_heads, confirmed_names, pending_names)
     """
     confirmed_heads = [0.0] * 48
     pending_heads = [0.0] * 48
+    confirmed_names = [[] for _ in range(48)]
+    pending_names = [[] for _ in range(48)]
 
     if not confirmed_df.empty:
         rows = confirmed_df[
@@ -232,9 +240,12 @@ def build_hour_breakdown(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
                 cells = expand_to_hour_bands(r["開始"], r["終了"])
             except Exception:
                 continue
+            name = str(r.get("氏名", "")).strip() or "(氏名不明)"
             for h, minutes in cells.items():
                 if 0 <= h < 48:
                     confirmed_heads[h] += minutes / 60.0
+                    if name not in confirmed_names[h]:
+                        confirmed_names[h].append(name)
 
     if not wishes_df.empty:
         rows = wishes_df[
@@ -245,8 +256,11 @@ def build_hour_breakdown(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
                 cells = expand_to_hour_bands(r["開始"], r["終了"])
             except Exception:
                 continue
+            name = str(r.get("氏名", "")).strip() or "(氏名不明)"
             for h, minutes in cells.items():
                 if 0 <= h < 48:
                     pending_heads[h] += minutes / 60.0
+                    if name not in pending_names[h]:
+                        pending_names[h].append(name)
 
-    return confirmed_heads, pending_heads
+    return confirmed_heads, pending_heads, confirmed_names, pending_names
