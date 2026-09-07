@@ -33,11 +33,13 @@ from matching import build_suggestions, build_board, build_hour_breakdown
 from line_notify import send_confirmation
 
 
-def render_hourly_html(confirmed_heads, pending_heads):
+def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_names):
     """
     0〜47時間帯の確定・希望人数を、ダイス表示と同じ考え方（1時間ごとの
     マス）で、色付きの2行の表として組み立てる。動きがある時間帯の
     前後だけを表示し、テーブルが無駄に横長にならないようにする。
+    数字の下に、その時間帯にかかっている人の氏名を小さく添える
+    （「そのマスに実際は誰が入っているか」が一目で分かるようにするため）。
     """
     active = [h for h in range(48)
               if confirmed_heads[h] > 0 or pending_heads[h] > 0]
@@ -54,6 +56,15 @@ def render_hourly_html(confirmed_heads, pending_heads):
     def fmt(v):
         return "" if v == 0 else (str(int(v)) if v == int(v) else f"{v:.1f}")
 
+    def esc(v):
+        return html_lib.escape(str(v))
+
+    def name_html(names):
+        if not names:
+            return ""
+        return "<br>".join(
+            f'<span style="font-size:10px;color:#555;">{esc(n)}</span>' for n in names)
+
     parts = ['<div style="overflow-x:auto;">'
              '<table style="border-collapse:collapse;font-size:12px;">']
     parts.append('<tr><th style="border:1px solid #ddd;padding:4px 6px;'
@@ -64,21 +75,25 @@ def render_hourly_html(confirmed_heads, pending_heads):
     parts.append('</tr>')
 
     parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
-                 'background:#fafafa;font-weight:bold;white-space:nowrap;">確定</td>')
+                 'background:#fafafa;font-weight:bold;white-space:nowrap;'
+                 'vertical-align:top;">確定</td>')
     for h in hours:
         v = confirmed_heads[h]
         bg = "#8fd19e" if v >= 2 else ("#d9f0df" if v > 0 else "#ffffff")
         parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
-                     f'text-align:center;background:{bg};">{fmt(v)}</td>')
+                     f'text-align:center;background:{bg};vertical-align:top;'
+                     f'min-width:56px;">{fmt(v)}<br>{name_html(confirmed_names[h])}</td>')
     parts.append('</tr>')
 
     parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
-                 'background:#fafafa;font-weight:bold;white-space:nowrap;">希望</td>')
+                 'background:#fafafa;font-weight:bold;white-space:nowrap;'
+                 'vertical-align:top;">希望</td>')
     for h in hours:
         v = pending_heads[h]
         bg = "#ffe9a8" if v > 0 else "#ffffff"
         parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
-                     f'text-align:center;background:{bg};">{fmt(v)}</td>')
+                     f'text-align:center;background:{bg};vertical-align:top;'
+                     f'min-width:56px;">{fmt(v)}<br>{name_html(pending_names[h])}</td>')
     parts.append('</tr>')
 
     parts.append('</table></div>')
@@ -190,9 +205,11 @@ else:
     _drill_date = hc2.selectbox(
         "日付を選択", list(labels.columns) if len(labels.columns) else [], key="drill_date")
     if _drill_site and _drill_date:
-        _c_heads, _p_heads = build_hour_breakdown(
+        _c_heads, _p_heads, _c_names, _p_names = build_hour_breakdown(
             confirmed_df, wishes_df, _drill_site, _drill_date)
-        st.markdown(render_hourly_html(_c_heads, _p_heads), unsafe_allow_html=True)
+        st.markdown(
+            render_hourly_html(_c_heads, _p_heads, _c_names, _p_names),
+            unsafe_allow_html=True)
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
