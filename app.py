@@ -31,7 +31,7 @@ import streamlit as st
 from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
-    load_reference, save_reference,
+    load_reference, save_reference, save_reference_bulk,
 )
 from matching import (
     build_suggestions, build_board, build_hour_breakdown,
@@ -482,11 +482,12 @@ else:
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
                     target_sites = sorted(actual_raw["現場名"].dropna().unique())
-                    done = 0
+                    patterns = {}
                     for s in target_sites:
                         pattern = build_reference_pattern_from_hourly(actual_raw, s)
-                        if pattern and save_reference(s, pattern, now_s):
-                            done += 1
+                        if pattern:
+                            patterns[s] = pattern
+                    done = save_reference_bulk(patterns, now_s)
                     st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
                     st.rerun()
 
@@ -510,11 +511,12 @@ else:
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_matrix_btn"):
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
                     target_sites = sorted(_melted["現場名"].dropna().unique())
-                    done = 0
+                    patterns = {}
                     for s in target_sites:
                         pattern = build_reference_pattern_from_hourly(_melted, s)
-                        if pattern and save_reference(s, pattern, now_s):
-                            done += 1
+                        if pattern:
+                            patterns[s] = pattern
+                    done = save_reference_bulk(patterns, now_s)
                     st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
                     st.rerun()
             else:
@@ -568,11 +570,12 @@ else:
                     })[["現場", "日付", "開始", "終了"]].dropna()
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
                     target_sites = sorted(actual_df["現場"].dropna().unique())
-                    done = 0
+                    patterns = {}
                     for s in target_sites:
                         pattern = build_reference_pattern(actual_df, s)
-                        if pattern and save_reference(s, pattern, now_s):
-                            done += 1
+                        if pattern:
+                            patterns[s] = pattern
+                    done = save_reference_bulk(patterns, now_s)
                     st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
                     st.rerun()
 
