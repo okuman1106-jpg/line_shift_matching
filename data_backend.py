@@ -47,9 +47,21 @@ def _get_gspread_client():
     return gspread.authorize(creds)
 
 
-def _get_sheet(sheet_name):
+@st.cache_resource(show_spinner=False)
+def _get_spreadsheet():
+    """
+    スプレッドシート自体を開く処理は、Google側のAPIを1回消費する。
+    以前は「希望」「現場マスタ」等を読み書きするたびに毎回開き直して
+    いたため、画面を1回操作するだけで何度もAPIを呼び出してしまい、
+    短時間にアクセスが集中してエラーになることがあった。
+    ここでキャッシュし、開く処理自体は最初の1回だけにする。
+    """
     client = _get_gspread_client()
-    sh = client.open_by_key(st.secrets["SHEET_ID"])
+    return client.open_by_key(st.secrets["SHEET_ID"])
+
+
+def _get_sheet(sheet_name):
+    sh = _get_spreadsheet()
     return sh.worksheet(sheet_name)
 
 
@@ -145,6 +157,7 @@ def append_confirmed(row: dict):
     _save_demo("確定シフト", df)
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def load_reference():
     """現場ごとの、時間帯別お手本ダイス（基準パターン）を読み込む。"""
     if is_live_mode():
@@ -189,12 +202,14 @@ def save_reference(site, hour_pattern, now_str):
         ws.append_row(REFERENCE_COLUMNS)
         if not df.empty:
             ws.append_rows(df[REFERENCE_COLUMNS].values.tolist())
+        load_reference.clear()
         return True
 
     df = _load_demo("基準パターン", REFERENCE_COLUMNS)
     df = df[df["現場"] != site]
     df = pd.concat([df, new_rows], ignore_index=True)
     _save_demo("基準パターン", df)
+    load_reference.clear()
     return True
 
 
