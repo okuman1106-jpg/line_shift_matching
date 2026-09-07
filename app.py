@@ -747,6 +747,22 @@ else:
                         ["📋 縦長形式", "🎲 マトリクス形式（1座席1行・47時間帯）"])
 
                     with _seat_tab1:
+                        st.markdown("###### 現場ごとの集計")
+                        _seat_summary = (
+                            _seat_list.assign(
+                                is_空席=lambda d: d["状態"] == "空席",
+                                is_希望=lambda d: d["状態"].isin(["希望", "希望(超過)"]),
+                                is_確定=lambda d: d["状態"] == "確定")
+                            .groupby("現場名")
+                            .agg(総座席数=("座席ID", "count"),
+                                 空席数=("is_空席", "sum"),
+                                 希望数=("is_希望", "sum"),
+                                 確定数=("is_確定", "sum"))
+                            .reset_index()
+                            .sort_values("現場名"))
+                        st.dataframe(_seat_summary, hide_index=True, width="stretch")
+
+                        st.markdown("###### 座席1件ずつの詳細")
                         st.dataframe(_seat_list, hide_index=True, width="stretch")
                         _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
                         st.download_button(
@@ -756,12 +772,34 @@ else:
 
                     with _seat_tab2:
                         st.caption(
-                            "現場・日付・座席番号を1行として、横に0〜47時間帯を"
-                            "並べたマトリクスです。マスの中身は、その時間帯に"
-                            "その座席へ入っている人の氏名です（空席は空欄）。")
-                        _seat_matrix = _seat_list.pivot_table(
+                            "現場・日付・座席番号を1行として、横に時間帯を並べた"
+                            "マトリクスです。マスの中身は、その時間帯にその座席へ"
+                            "入っている人の氏名です（空席は空欄）。複数の現場を"
+                            "一度に表示すると、営業時間帯が違う現場同士で"
+                            "無関係な列が空欄だらけになって見づらいため、"
+                            "現場を選んで表示します。")
+                        _matrix_sites = sorted(_seat_list["現場名"].unique())
+                        _matrix_site_filter = st.multiselect(
+                            "表示する現場（未選択なら全現場）", _matrix_sites,
+                            key="seat_matrix_site_filter")
+                        _matrix_source = _seat_list[
+                            _seat_list["現場名"].isin(_matrix_site_filter)] \
+                            if _matrix_site_filter else _seat_list
+
+                        _seat_matrix = _matrix_source.pivot_table(
                             index=["現場名", "日付", "座席番号"], columns="時間帯",
                             values="氏名", aggfunc="first", fill_value="").reset_index()
+                        # 選ばれた現場にとって無関係な時間帯の列は表示から外す。
+                        # 「セルの中身が空かどうか」ではなく「その時間帯に座席が
+                        # そもそも存在するか」で判定する（誰も予約していない
+                        # だけの空席は、ここで消してしまってはいけない）。
+                        _relevant_hours = set(_matrix_source["時間帯"].unique())
+                        _hour_cols_in_matrix = [
+                            c for c in _seat_matrix.columns
+                            if c not in ("現場名", "日付", "座席番号")]
+                        _irrelevant_cols = [
+                            c for c in _hour_cols_in_matrix if c not in _relevant_hours]
+                        _seat_matrix = _seat_matrix.drop(columns=_irrelevant_cols)
                         _seat_matrix.columns = [
                             str(c) if isinstance(c, str) else f"{c}時"
                             for c in _seat_matrix.columns]
