@@ -191,6 +191,46 @@ def build_board(wishes_df: pd.DataFrame, confirmed_df: pd.DataFrame,
     return labels, counts, pendings
 
 
+def build_day_hourly_board(wishes_df: pd.DataFrame, confirmed_df: pd.DataFrame,
+                            sites_df: pd.DataFrame, date: str):
+    """
+    「1日を選んで、全現場 × 47時間帯」の盤面データを作る。
+    「現場 × 日付」の盤面（build_board）は日が増えるほどマスが粗くなり、
+    予約が増えると管理しづらくなるため、1日に絞った代わりに横軸を
+    時間帯まで細かくした版。
+
+    戻り値：
+      labels … マスに表示する文字列（例："確定2 / 希望1"）の表
+      counts … マスの色分けに使う、確定人数（頭数）だけの数値の表
+      pendings … マスの色分けに使う、未処理希望人数（頭数）だけの数値の表
+      active_sites … その日に動きがある現場だけを抜き出した一覧
+                     （全現場を表示すると縦に長くなりすぎるため）
+    """
+    sites = list(sites_df["現場名"]) if not sites_df.empty else []
+    hours = list(range(48))
+
+    labels = pd.DataFrame("", index=sites, columns=hours)
+    counts = pd.DataFrame(0.0, index=sites, columns=hours)
+    pendings = pd.DataFrame(0.0, index=sites, columns=hours)
+
+    for site in sites:
+        c_heads, p_heads, _, _ = build_hour_breakdown(
+            confirmed_df, wishes_df, site, date)
+        for h in hours:
+            counts.loc[site, h] = c_heads[h]
+            pendings.loc[site, h] = p_heads[h]
+            parts = []
+            if c_heads[h] > 0:
+                parts.append(f"確定{c_heads[h]:g}")
+            if p_heads[h] > 0:
+                parts.append(f"希望{p_heads[h]:g}")
+            labels.loc[site, h] = " / ".join(parts) if parts else "―"
+
+    active_sites = [s for s in sites
+                    if counts.loc[s].sum() > 0 or pendings.loc[s].sum() > 0]
+    return labels, counts, pendings, active_sites
+
+
 def _parse_hm_to_minutes(s):
     """'HH:MM' 形式の文字列を、0時からの分数に変換する。"""
     h, m = str(s).strip().split(":")
@@ -672,3 +712,243 @@ def find_unmatched_site_names(names, sites_df: pd.DataFrame, aliases_df: pd.Data
         if normalized not in known:
             unmatched.append(n)
     return unmatched
+
+
+def get_wage_for(name: str, site: str, sites_df: pd.DataFrame, staff_wages_df: pd.DataFrame):
+    """
+    「スタッフ優遇時給」に登録があればそちらを優先し、無ければ現場の
+    基本時給を返す。どちらにも時給の情報が無ければ 0 を返す。
+    """
+    if staff_wages_df is not None and not staff_wages_df.empty:
+        hit = staff_wages_df[staff_wages_df["氏名"] == name]
+        if not hit.empty:
+            try:
+                w = float(hit.iloc[0]["時給"])
+                if w > 0:
+                    return w
+            except (ValueError, TypeError):
+                pass
+
+    if sites_df is not None and not sites_df.empty:
+        hit = sites_df[sites_df["現場名"] == site]
+        if not hit.empty:
+            try:
+                w = float(hit.iloc[0].get("時給", "") or 0)
+                if w > 0:
+                    return w
+            except (ValueError, TypeError):
+                pass
+
+    return 0.0
+
+
+def compute_labor_cost(confirmed_df: pd.DataFrame, sites_df: pd.DataFrame,
+                        staff_wages_df: pd.DataFrame):
+    """
+    確定シフトの一覧に、1件ごとの「実働時間」「適用時給」「人件費」を
+    付け加えて返す（簡易版：深夜・残業の割増は考慮しない、時給×時間の
+    単純計算）。優遇時給が登録されている人はそちらを、登録が無い人は
+    現場の基本時給を使う（どちらも無ければ0円として計算される＝
+    未設定であることが分かるようにしている）。
+
+    深夜・残業割増込みの精密な計算をしたい場合は
+    compute_labor_cost_precise() を使うこと。
+    """
+    if confirmed_df.empty:
+        return confirmed_df.assign(実働時間=[], 適用時給=[], 人件費=[])
+
+    out = confirmed_df.copy()
+    hours_list, wage_list, cost_list = [], [], []
+    for _, r in out.iterrows():
+        try:
+            sm = _parse_hm_to_minutes(r["開始"])
+            em = _parse_hm_to_minutes(r["終了"])
+            if em <= sm:
+                em += 24 * 60
+            hours = (em - sm) / 60.0
+        except Exception:
+            hours = 0.0
+        wage = get_wage_for(r.get("氏名", ""), r.get("現場", ""), sites_df, staff_wages_df)
+        hours_list.append(round(hours, 2))
+        wage_list.append(wage)
+        cost_list.append(round(hours * wage))
+
+    out["実働時間"] = hours_list
+    out["適用時給"] = wage_list
+    out["人件費"] = cost_list
+    return out
+
+
+# 深夜（22:00〜翌5:00）にあたる、0〜47時間帯の通し番号の集合。
+# 22,23時（当日）と、0,1,2,3,4時（＝24,25,26,27,28時として翌日側に
+# 現れる）が対象。
+_NIGHT_HOURS_MOD24 = {22, 23, 0, 1, 2, 3, 4}
+
+
+def compute_shift_wage_precise(start_str, end_str, hourly_wage,
+                                night_rate=0.25, ot_rate=0.25,
+                                daily_ot_threshold_hours=8.0):
+    """
+    前の特許用アプリ（人件費ダイス分析システム）と同じ考え方で、
+    1回の勤務（出勤〜退勤）の賃金を、深夜割増・残業割増込みで計算する。
+
+    賃金 = 時給 ×
+      [ 全時間 ×（1 ＋ 深夜時間の割合 × 深夜割増率）
+        ＋ 残業時間 × 残業割増率 ]
+
+    残業時間は、シフトを時系列に並べたとき、1日の所定時間
+    （既定8時間）を超えた「後ろ側」の時間とする（前のアプリの
+    「残業枠×残業割合」の考え方を、1シフト単位に簡略化したもの）。
+    深夜・残業の両方に該当する時間は、両方の割増が上乗せされる。
+
+    戻り値：(実働時間, 深夜時間, 残業時間, 賃金)
+    """
+    cells = expand_to_hour_bands(start_str, end_str)  # {時間帯: 分}
+    if not cells:
+        return 0.0, 0.0, 0.0, 0.0
+
+    total_minutes = sum(cells.values())
+    total_hours = total_minutes / 60.0
+
+    night_minutes = sum(
+        m for h, m in cells.items() if (h % 24) in _NIGHT_HOURS_MOD24)
+    night_hours = night_minutes / 60.0
+
+    # 時系列順（＝時間帯の通し番号順）に積み上げて、所定時間を超えた
+    # 分だけを残業として扱う。
+    threshold_minutes = daily_ot_threshold_hours * 60
+    cumulative = 0
+    ot_minutes = 0
+    for h in sorted(cells.keys()):
+        m = cells[h]
+        before = cumulative
+        cumulative += m
+        if cumulative > threshold_minutes:
+            ot_minutes += min(m, cumulative - max(before, threshold_minutes))
+    ot_hours = ot_minutes / 60.0
+
+    night_share = (night_hours / total_hours) if total_hours > 0 else 0.0
+    wage = hourly_wage * (
+        total_hours * (1.0 + night_share * night_rate)
+        + ot_hours * ot_rate
+    )
+    return round(total_hours, 2), round(night_hours, 2), round(ot_hours, 2), round(wage)
+
+
+def compute_labor_cost_precise(confirmed_df: pd.DataFrame, sites_df: pd.DataFrame,
+                                staff_wages_df: pd.DataFrame,
+                                night_rate=0.25, ot_rate=0.25,
+                                daily_ot_threshold_hours=8.0):
+    """
+    確定シフトの一覧に、深夜割増・残業割増込みの精密な人件費を付けて返す。
+    列構成は compute_labor_cost() と互換（実働時間・適用時給・人件費）に
+    加えて、深夜時間・残業時間も付与する。
+    """
+    if confirmed_df.empty:
+        return confirmed_df.assign(
+            実働時間=[], 深夜時間=[], 残業時間=[], 適用時給=[], 人件費=[])
+
+    out = confirmed_df.copy()
+    hours_list, night_list, ot_list, wage_list, cost_list = [], [], [], [], []
+    for _, r in out.iterrows():
+        wage = get_wage_for(r.get("氏名", ""), r.get("現場", ""), sites_df, staff_wages_df)
+        try:
+            hours, night_h, ot_h, cost = compute_shift_wage_precise(
+                r["開始"], r["終了"], wage,
+                night_rate=night_rate, ot_rate=ot_rate,
+                daily_ot_threshold_hours=daily_ot_threshold_hours)
+        except Exception:
+            hours, night_h, ot_h, cost = 0.0, 0.0, 0.0, 0
+        hours_list.append(hours)
+        night_list.append(night_h)
+        ot_list.append(ot_h)
+        wage_list.append(wage)
+        cost_list.append(cost)
+
+    out["実働時間"] = hours_list
+    out["深夜時間"] = night_list
+    out["残業時間"] = ot_list
+    out["適用時給"] = wage_list
+    out["人件費"] = cost_list
+    return out
+
+
+def find_pool_wishes(wishes_df: pd.DataFrame, confirmed_df: pd.DataFrame,
+                      reference_df: pd.DataFrame):
+    """
+    「未処理」の希望のうち、第1希望の現場・日付・時間帯が、**確定済みの
+    人だけで**お手本の座席数を使い切ってしまっている（＝他の人が先に
+    確定してしまい、後から本人が確定される見込みが薄い）ものを
+    「プール要員」として抜き出す。
+
+    ここでは、まだ埋まっていない「未処理」同士の競合は考慮しない
+    （それはこれから確定できる余地があるため）。あくまで「確定済みの
+    人によって、物理的に席が埋まっている」かどうかだけで判定する。
+
+    戻り値：プール対象の希望だけを含むDataFrame（wishes_dfと同じ列構成）
+    """
+    if wishes_df.empty:
+        return wishes_df.iloc[0:0]
+
+    pending = wishes_df[wishes_df["ステータス"] == "未処理"]
+    if pending.empty:
+        return pending
+
+    pool_idx = []
+    for idx, r in pending.iterrows():
+        site = r["第1希望現場"]
+        date = r["希望日"]
+        try:
+            cells = expand_to_hour_bands(r["開始"], r["終了"])
+        except Exception:
+            continue
+        hours_used = [h for h in cells if 0 <= h < 48]
+        if not hours_used:
+            continue
+
+        ref_arr = reference_df_to_array(reference_df, site)
+        c_heads, _, _, _ = build_hour_breakdown(confirmed_df, wishes_df, site, date)
+
+        # 希望している時間帯のどこか1つでも、確定済みだけで座席数を
+        # 使い切っていれば「席が無い」と判定する。
+        is_full = any(
+            round(ref_arr[h]) > 0 and c_heads[h] >= round(ref_arr[h])
+            for h in hours_used)
+        if is_full:
+            pool_idx.append(idx)
+
+    return pending.loc[pool_idx]
+
+
+def suggest_alternative_slots(wish_row, sites_df: pd.DataFrame,
+                               reference_df: pd.DataFrame, confirmed_df: pd.DataFrame,
+                               wishes_df: pd.DataFrame):
+    """
+    プール要員1人ぶんについて、同じエリアの近場現場の中から、希望している
+    日付・時間帯に空き（お手本の座席数 − 確定済み人数 > 0）がある候補を
+    探す。空きが多い候補ほど上位に来るよう並べ替える。
+
+    戻り値：[{"現場": str, "空き人数": float}, ...]（空きが多い順）
+    """
+    site = wish_row["第1希望現場"]
+    date = wish_row["希望日"]
+    try:
+        cells = expand_to_hour_bands(wish_row["開始"], wish_row["終了"])
+    except Exception:
+        return []
+    hours_used = [h for h in cells if 0 <= h < 48]
+    if not hours_used:
+        return []
+
+    candidates = []
+    for alt_site in nearby_sites(sites_df, site):
+        ref_arr = reference_df_to_array(reference_df, alt_site)
+        c_heads, _, _, _ = build_hour_breakdown(confirmed_df, wishes_df, alt_site, date)
+        # 希望している時間帯すべてで、一番厳しい（空きが少ない）所を基準にする
+        min_capacity = min(
+            (round(ref_arr[h]) - c_heads[h]) for h in hours_used)
+        if min_capacity > 0:
+            candidates.append({"現場": alt_site, "空き人数": min_capacity})
+
+    candidates.sort(key=lambda x: -x["空き人数"])
+    return candidates
