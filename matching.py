@@ -9,6 +9,21 @@
 """
 import pandas as pd
 
+
+def detect_period_label(dates):
+    """
+    日付の一覧（文字列のリストやSeries）から、「このデータはいつの実績か」
+    を表すラベルを作る。1つの月に収まっていれば「2026-02」のように、
+    複数の月にまたがっていれば「2026-02〜2026-04」のように表示する。
+    日付が読み取れない場合は空文字を返す。
+    """
+    parsed = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dropna()
+    if parsed.empty:
+        return ""
+    lo = parsed.min().strftime("%Y-%m")
+    hi = parsed.max().strftime("%Y-%m")
+    return lo if lo == hi else f"{lo}〜{hi}"
+
 EXPERIENCE_THRESHOLD = 3  # この現場での通算出勤回数がこれ以上で「経験者」
 
 
@@ -326,15 +341,31 @@ def build_reference_pattern_from_hourly(hourly_df: pd.DataFrame, site: str):
     return {h: v / n_days for h, v in totals.items() if v > 0}
 
 
-def reference_df_to_array(reference_df: pd.DataFrame, site: str):
+def reference_df_to_array(reference_df: pd.DataFrame, site: str, period: str = None):
     """
-    保存済みの「基準パターン」データ（現場・時間帯・基準人数の表）から、
-    指定した現場の48時間帯分の配列を取り出す。
+    保存済みの「基準パターン」データ（現場・時間帯・基準人数・対象期間の表）
+    から、指定した現場の48時間帯分の配列を取り出す。
+
+    period を指定すれば、その対象期間（例："2026-02"）のものだけを使う。
+    指定しなければ、その現場の中で最後に作成されたもの（作成日時が
+    一番新しいもの）を自動で選ぶ（従来通りの動き）。
     """
     arr = [0.0] * 48
     if reference_df.empty:
         return arr
     rows = reference_df[reference_df["現場"] == site]
+    if rows.empty:
+        return arr
+
+    if period is not None:
+        rows = rows[rows.get("対象期間", "") == period]
+    elif "作成日時" in rows.columns and rows["作成日時"].notna().any():
+        latest_period = (
+            rows.sort_values("作成日時", ascending=False)["対象期間"].iloc[0]
+            if "対象期間" in rows.columns else None)
+        if latest_period is not None:
+            rows = rows[rows["対象期間"] == latest_period]
+
     for _, r in rows.iterrows():
         try:
             h = int(r["時間帯"])
@@ -344,6 +375,18 @@ def reference_df_to_array(reference_df: pd.DataFrame, site: str):
         if 0 <= h < 48:
             arr[h] = v
     return arr
+
+
+def list_reference_periods(reference_df: pd.DataFrame, site: str):
+    """指定した現場について、保存されている対象期間の一覧（新しい順）を返す。"""
+    if reference_df.empty:
+        return []
+    rows = reference_df[reference_df["現場"] == site]
+    if rows.empty or "対象期間" not in rows.columns:
+        return []
+    periods = (rows[["対象期間", "作成日時"]].drop_duplicates()
+              .sort_values("作成日時", ascending=False)["対象期間"].tolist())
+    return [p for p in periods if p]
 
 
 def build_staff_dice_rows(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
@@ -595,3 +638,37 @@ def annotate_seat_list_with_occupancy(seat_list: pd.DataFrame,
                 out.at[i, "状態"] = info["状態"]
 
     return out
+
+
+def normalize_site_name(name: str, aliases_df: pd.DataFrame) -> str:
+    """
+    現場名の表記ゆれを、対応表を使って正式名に変換する。
+    対応表に登録が無ければ、入力された名前をそのまま返す
+    （エイリアス未登録＝現場マスタと完全一致している、という前提）。
+    """
+    name = str(name).strip()
+    if aliases_df is None or aliases_df.empty:
+        return name
+    hit = aliases_df[aliases_df["表記ゆれ"] == name]
+    if not hit.empty:
+        return hit.iloc[0]["正式名"]
+    return name
+
+
+def find_unmatched_site_names(names, sites_df: pd.DataFrame, aliases_df: pd.DataFrame):
+    """
+    アップロードされたデータに含まれる現場名のうち、正規化しても
+    現場マスタに存在しない（＝表記ゆれの可能性がある）ものを一覧で返す。
+    """
+    known = set(sites_df["現場名"]) if sites_df is not None and not sites_df.empty else set()
+    unmatched = []
+    seen = set()
+    for n in names:
+        n = str(n).strip()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        normalized = normalize_site_name(n, aliases_df)
+        if normalized not in known:
+            unmatched.append(n)
+    return unmatched
