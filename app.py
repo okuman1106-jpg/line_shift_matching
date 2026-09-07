@@ -578,41 +578,62 @@ else:
 
     with st.expander("🪑 座席番号の一括生成"):
         st.caption(
-            "登録済みの「お手本ダイス」から、指定した日付ぶんの座席番号"
+            "登録済みの「お手本ダイス」から、指定した期間ぶんの座席番号"
             "（現場・日付・時間帯・座席番号・座席IDの一覧）を、"
             "登録されている全現場について一気に作ります。座席は"
             "1時間ごとに独立していて、その時間帯のお手本人数（四捨五入）ぶん"
             "だけ作られます。まだ誰も割り当てられていない「空席リスト」です。")
-        _seat_gen_dates = st.text_area(
-            "対象日付（1行に1つ、YYYY-MM-DD形式）",
-            value=datetime.now().strftime("%Y-%m-%d"), height=80,
-            help="複数の日付をまとめて生成したい場合は、改行で区切って"
-                 "何行でも入力してください。")
-        if st.button("🪑 この日付ぶんの座席を一括生成する", key="gen_seat_list_btn"):
-            _target_dates = [d.strip() for d in _seat_gen_dates.splitlines() if d.strip()]
-            _reference_df_all = load_reference()
-            _seat_list = generate_seat_list(_reference_df_all, _target_dates)
-            if _seat_list.empty:
-                st.warning(
-                    "座席が1件も生成されませんでした。お手本ダイスが"
-                    "登録されているか確認してください。")
+        _seat_gen_mode = st.radio(
+            "対象日付の指定方法", ["期間で指定（例：3月分をまとめて）", "個別に指定"],
+            key="seat_gen_mode", horizontal=True)
+        if _seat_gen_mode == "期間で指定（例：3月分をまとめて）":
+            _range_c1, _range_c2 = st.columns(2)
+            _range_start = _range_c1.date_input("開始日", key="seat_gen_start")
+            _range_end = _range_c2.date_input("終了日", key="seat_gen_end")
+        else:
+            _seat_gen_dates = st.text_area(
+                "対象日付（1行に1つ、YYYY-MM-DD形式）",
+                value=datetime.now().strftime("%Y-%m-%d"), height=80,
+                help="複数の日付をまとめて生成したい場合は、改行で区切って"
+                     "何行でも入力してください。")
+
+        if st.button("🪑 この期間ぶんの座席を一括生成する", key="gen_seat_list_btn"):
+            if _seat_gen_mode == "期間で指定（例：3月分をまとめて）":
+                if _range_start > _range_end:
+                    st.error("開始日は終了日より前の日付にしてください。")
+                    _target_dates = []
+                else:
+                    _n_days = (_range_end - _range_start).days + 1
+                    _target_dates = [
+                        (_range_start + pd.Timedelta(days=i)).strftime("%Y-%m-%d")
+                        for i in range(_n_days)]
             else:
-                _seat_list = annotate_seat_list_with_occupancy(
-                    _seat_list, _reference_df_all, confirmed_df, wishes_df)
-                _n_filled = int((_seat_list["状態"] != "空席").sum())
-                st.success(
-                    f"✅ {len(_target_dates)} 日ぶん・{_seat_list['現場名'].nunique()} "
-                    f"現場ぶん、合計 {len(_seat_list)} 席を生成しました"
-                    f"（うち {_n_filled} 席に申請者がいます）。")
-                st.caption(
-                    "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
-                    "その座席の申請者が分かるようになっています。")
-                st.dataframe(_seat_list, hide_index=True, width="stretch")
-                _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📥 座席リストのCSVをダウンロード", _seat_list_csv,
-                    file_name=f"座席リスト_{datetime.now():%Y%m%d}.csv",
-                    mime="text/csv", key="seat_list_csv")
+                _target_dates = [d.strip() for d in _seat_gen_dates.splitlines() if d.strip()]
+
+            if _target_dates:
+                _reference_df_all = load_reference()
+                _seat_list = generate_seat_list(_reference_df_all, _target_dates)
+                if _seat_list.empty:
+                    st.warning(
+                        "座席が1件も生成されませんでした。お手本ダイスが"
+                        "登録されているか確認してください。")
+                else:
+                    _seat_list = annotate_seat_list_with_occupancy(
+                        _seat_list, _reference_df_all, confirmed_df, wishes_df)
+                    _n_filled = int((_seat_list["状態"] != "空席").sum())
+                    st.success(
+                        f"✅ {len(_target_dates)} 日ぶん・{_seat_list['現場名'].nunique()} "
+                        f"現場ぶん、合計 {len(_seat_list)} 席を生成しました"
+                        f"（うち {_n_filled} 席に申請者がいます）。")
+                    st.caption(
+                        "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
+                        "その座席の申請者が分かるようになっています。")
+                    st.dataframe(_seat_list, hide_index=True, width="stretch")
+                    _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        "📥 座席リストのCSVをダウンロード", _seat_list_csv,
+                        file_name=f"座席リスト_{datetime.now():%Y%m%d}.csv",
+                        mime="text/csv", key="seat_list_csv")
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
