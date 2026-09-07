@@ -312,6 +312,37 @@ def add_alias(variant: str, canonical: str):
     return True
 
 
+def delete_alias(variant: str):
+    """表記ゆれの登録を1件削除する（間違えて登録した場合の取り消し用）。"""
+    variant = variant.strip()
+    if not variant:
+        return False
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("現場名エイリアス")
+        except Exception:
+            return False
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=ALIAS_COLUMNS)
+        for c in ALIAS_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[df["表記ゆれ"] != variant]
+        ws.clear()
+        ws.append_row(ALIAS_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[ALIAS_COLUMNS].values.tolist())
+        load_aliases.clear()
+        return True
+
+    df = _load_demo("現場名エイリアス", ALIAS_COLUMNS)
+    df = df[df["表記ゆれ"] != variant]
+    _save_demo("現場名エイリアス", df)
+    load_aliases.clear()
+    return True
+
+
 def seed_demo_data():
     """デモモード用の初期データが無ければ作成する（動作確認しやすくするため）。"""
     if not _demo_path("希望").exists():
