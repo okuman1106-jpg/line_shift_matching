@@ -122,3 +122,55 @@ def build_suggestions(wishes_df: pd.DataFrame, sites_df: pd.DataFrame,
     result = result.sort_values("_is_exp", ascending=False).drop(
         columns=["_exp_sort", "_is_exp"])
     return result.reset_index(drop=True)
+
+
+def build_board(wishes_df: pd.DataFrame, confirmed_df: pd.DataFrame,
+                 sites_df: pd.DataFrame, days_ahead: int = 14):
+    """
+    「現場 × 日付」のマス目（盤面）データを作る。ダイス盤面のように、
+    各マスに「確定n件／希望n件」を表示するための2つの表を返す。
+
+    戻り値：
+      labels … マスに表示する文字列（例："確定2 / 希望1"）の表
+      counts … マスの色分けに使う、確定人数だけの数値の表
+      pendings … マスの色分けに使う、未処理希望件数だけの数値の表
+    """
+    today = pd.Timestamp.now().normalize()
+    dates = [(today + pd.Timedelta(days=i)).strftime("%Y-%m-%d")
+             for i in range(days_ahead)]
+    sites = list(sites_df["現場名"]) if not sites_df.empty else []
+
+    labels = pd.DataFrame("", index=sites, columns=dates)
+    counts = pd.DataFrame(0, index=sites, columns=dates)
+    pendings = pd.DataFrame(0, index=sites, columns=dates)
+
+    if not confirmed_df.empty and sites and dates:
+        conf = confirmed_df[
+            confirmed_df["現場"].isin(sites) & confirmed_df["日付"].isin(dates)]
+        conf_counts = conf.groupby(["現場", "日付"]).size()
+    else:
+        conf_counts = pd.Series(dtype=int)
+
+    if not wishes_df.empty and sites and dates:
+        pend = wishes_df[
+            (wishes_df["ステータス"] == "未処理")
+            & wishes_df["第1希望現場"].isin(sites)
+            & wishes_df["希望日"].isin(dates)]
+        pend_counts = pend.groupby(["第1希望現場", "希望日"]).size()
+    else:
+        pend_counts = pd.Series(dtype=int)
+
+    for site in sites:
+        for date in dates:
+            c = int(conf_counts.get((site, date), 0))
+            p = int(pend_counts.get((site, date), 0))
+            counts.loc[site, date] = c
+            pendings.loc[site, date] = p
+            parts = []
+            if c:
+                parts.append(f"確定{c}")
+            if p:
+                parts.append(f"希望{p}")
+            labels.loc[site, date] = " / ".join(parts) if parts else "―"
+
+    return labels, counts, pendings
