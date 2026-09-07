@@ -32,7 +32,7 @@ from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
     load_reference, save_reference, save_reference_bulk,
-    load_aliases, add_alias,
+    load_aliases, add_alias, delete_alias,
 )
 from matching import (
     build_suggestions, build_board, build_hour_breakdown,
@@ -843,3 +843,34 @@ else:
 with st.expander("🧑‍🤝‍🧑 現場マスタ（エリア設定）"):
     st.caption("同じエリアの現場同士が、近場スライドの候補になります。")
     st.dataframe(sites_df, hide_index=True, width="stretch")
+
+with st.expander("🔤 現場名エイリアスの管理"):
+    st.caption(
+        "登録済みの表記ゆれ対応（例：「Kosugi 3rd」→「kosugi3rd Avenue」）の"
+        "一覧です。間違えて登録してしまった場合は、ここから削除・修正できます。")
+    _alias_df_view = load_aliases()
+    if _alias_df_view.empty:
+        st.info("まだ登録されているエイリアスはありません。")
+    else:
+        for i, row in _alias_df_view.reset_index(drop=True).iterrows():
+            ac1, ac2, ac3, ac4 = st.columns([2, 1, 2, 1])
+            ac1.write(f"`{row['表記ゆれ']}`")
+            ac2.write("→")
+            _site_options = list(sites_df["現場名"]) if not sites_df.empty else []
+            _current = row["正式名"]
+            _idx = _site_options.index(_current) if _current in _site_options else 0
+            _new_target = ac3.selectbox(
+                "正式名", _site_options if _site_options else [_current],
+                index=_idx, key=f"alias_edit_{i}", label_visibility="collapsed")
+            if ac4.button("🗑️ 削除", key=f"alias_delete_{i}"):
+                if delete_alias(row["表記ゆれ"]):
+                    st.success(f"「{row['表記ゆれ']}」のエイリアスを削除しました。")
+                    st.rerun()
+            if _new_target != _current:
+                if st.button(
+                        f"「{row['表記ゆれ']}」の正式名を「{_new_target}」に直す",
+                        key=f"alias_update_{i}"):
+                    if add_alias(row["表記ゆれ"], _new_target):
+                        st.success(
+                            f"「{row['表記ゆれ']}」→「{_new_target}」に修正しました。")
+                        st.rerun()
