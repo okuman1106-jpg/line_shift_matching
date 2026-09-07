@@ -184,40 +184,61 @@ def load_reference():
 def save_reference(site, hour_pattern, now_str):
     """
     1つの現場について、48時間帯分の基準人数をまとめて保存する。
-    同じ現場の既存データは削除してから、新しい内容で置き換える
-    （「直近の実績をそのまま使う」方式のため、洗い替えでよい）。
+    複数の現場をまとめて保存したい場合は、save_reference_bulk() を
+    使うこと（現場の数だけ通信が発生し、Google側の利用制限に
+    かかりやすいため、この関数は「1つだけ直したい」ときの用途に限る）。
     hour_pattern … {時間帯(int): 基準人数(float)} の辞書
     """
-    new_rows = pd.DataFrame([
-        {"現場": site, "時間帯": str(h), "基準人数": f"{v:.2f}", "作成日時": now_str}
-        for h, v in hour_pattern.items() if v > 0
-    ], dtype=str)
+    return save_reference_bulk({site: hour_pattern}, now_str)
+
+
+def save_reference_bulk(patterns: dict, now_str: str):
+    """
+    複数の現場ぶんの基準パターンを、まとめて1回の読み書きで保存する。
+    現場の数だけ通信が発生する save_reference の繰り返し呼び出しでは、
+    現場数が多いとGoogle側のアクセス制限（1分あたりの読み込み回数）に
+    かかりやすいため、こちらでは既存データの読み込み・書き込みを
+    それぞれ1回だけで済ませる。
+
+    patterns … {現場名: {時間帯(int): 基準人数(float)}, ...}
+    戻り値：更新できた現場数
+    """
+    new_rows_list = []
+    for site, hour_pattern in patterns.items():
+        for h, v in hour_pattern.items():
+            if v > 0:
+                new_rows_list.append({
+                    "現場": site, "時間帯": str(h),
+                    "基準人数": f"{v:.2f}", "作成日時": now_str,
+                })
+    new_rows = pd.DataFrame(new_rows_list, dtype=str)
+    target_sites = set(patterns.keys())
 
     if is_live_mode():
         try:
             ws = _get_sheet("基準パターン")
         except Exception:
-            return False
-        existing = ws.get_all_records()
+            return 0
+        existing = ws.get_all_records()  # 読み込みは1回だけ
         df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=REFERENCE_COLUMNS)
         for c in REFERENCE_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
-        df = df[df["現場"] != site]
+        df = df[~df["現場"].isin(target_sites)]
         df = pd.concat([df, new_rows], ignore_index=True)
         ws.clear()
         ws.append_row(REFERENCE_COLUMNS)
         if not df.empty:
             ws.append_rows(df[REFERENCE_COLUMNS].values.tolist())
         load_reference.clear()
-        return True
+        return len(target_sites)
 
     df = _load_demo("基準パターン", REFERENCE_COLUMNS)
-    df = df[df["現場"] != site]
+    df = df[~df["現場"].isin(target_sites)]
     df = pd.concat([df, new_rows], ignore_index=True)
     _save_demo("基準パターン", df)
     load_reference.clear()
-    return True
+    return len(target_sites)
 
 
 def seed_demo_data():
