@@ -22,6 +22,7 @@ st.secrets に以下が設定されていれば「本番モード」（Googleス
   LINE_CHANNEL_ACCESS_TOKEN = "LINEのチャネルアクセストークン"
 """
 import html as html_lib
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -34,7 +35,8 @@ from data_backend import (
 )
 from matching import (
     build_suggestions, build_board, build_hour_breakdown,
-    build_reference_pattern_from_hourly, reference_df_to_array,
+    build_reference_pattern, build_reference_pattern_from_hourly,
+    reference_df_to_array,
     build_staff_dice_rows, build_seat_grid, build_daily_dice_from_confirmed,
     generate_seat_list, annotate_seat_list_with_occupancy,
 )
@@ -449,32 +451,32 @@ else:
     with st.expander("📥 実績データの取り込み（お手本ダイスの作成）"):
         st.caption(
             "前の特許用アプリの「🎲 時間帯別ダイス」内にある"
-            "「📤 お手本ダイス用データの書き出し」で作ったCSV"
-            "（現場名・日付・時間帯・頭数の4列）を、そのままアップロード"
-            "してください。列名を選び直す必要はありません。複数日ぶんが"
-            "含まれていれば、日数で割って「1日あたり平均」にします"
-            "（曜日は区別しない簡易版です）。同じ現場を取り込み直すと、"
-            "内容は最新のものに置き換わります。")
+            "「📤 お手本ダイス用データの書き出し」で作ったCSV（縦長形式）を"
+            "そのまま使うこともできますし、JOBLOOK2・タイミー・"
+            "スキマクエスト・マイチームなど、各アプリの勤怠CSVを"
+            "直接アップロードすることもできます。列名は自動で推測し、"
+            "違っていればプルダウンで選び直せます。")
         actual_file = st.file_uploader(
-            "お手本ダイス用CSV", type=["csv"], key="actual_upload")
+            "実績CSV（お手本ダイス用の4列形式、または各アプリの生データ）",
+            type=["csv"], key="actual_upload")
         if actual_file:
             try:
                 actual_raw = pd.read_csv(actual_file, encoding="utf-8-sig", dtype=str)
             except UnicodeDecodeError:
                 actual_file.seek(0)
                 actual_raw = pd.read_csv(actual_file, encoding="cp932", dtype=str)
+            actual_cols = list(actual_raw.columns)
 
             required_cols = {"現場名", "日付", "時間帯", "頭数"}
-            if not required_cols.issubset(set(actual_raw.columns)):
-                st.error(
-                    "必要な列（現場名・日付・時間帯・頭数）が見つかりません。"
-                    f"認識した列：{', '.join(actual_raw.columns)}。"
-                    "前の特許用アプリの書き出し機能で作ったCSVをそのまま"
-                    "使ってください。")
-            else:
+            _hour_col_pattern = re.compile(r"^\d{1,2}時$")
+            _hour_cols = [c for c in actual_cols if _hour_col_pattern.match(c)]
+
+            if required_cols.issubset(set(actual_cols)):
+                # ケース1：前の特許用アプリの書き出し機能と同じ、縦長の4列形式
                 st.caption(
                     f"{len(actual_raw)} 行／"
-                    f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました。")
+                    f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました"
+                    "（縦長形式として認識しました）。")
                 st.dataframe(actual_raw.head(10), hide_index=True, width="stretch")
 
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
@@ -483,6 +485,92 @@ else:
                     done = 0
                     for s in target_sites:
                         pattern = build_reference_pattern_from_hourly(actual_raw, s)
+                        if pattern and save_reference(s, pattern, now_s):
+                            done += 1
+                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    st.rerun()
+
+            elif {"現場名", "日付"}.issubset(set(actual_cols)) and _hour_cols:
+                # ケース2：前の特許用アプリの「マトリクス形式」（現場名・日付・
+                # 9時・10時…と横に時間帯が並ぶ形）。縦長形式に変換してから
+                # 中身は縦長形式とまったく同じように扱う。
+                _melted = actual_raw.melt(
+                    id_vars=["現場名", "日付"], value_vars=_hour_cols,
+                    var_name="時間帯", value_name="頭数")
+                _melted["時間帯"] = _melted["時間帯"].str.replace("時", "", regex=False)
+                _melted["頭数"] = pd.to_numeric(_melted["頭数"], errors="coerce").fillna(0)
+                _melted = _melted[_melted["頭数"] > 0]
+
+                st.caption(
+                    f"{len(actual_raw)} 行／"
+                    f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました"
+                    "（マトリクス形式として認識し、自動的に変換しました）。")
+                st.dataframe(actual_raw.head(10), hide_index=True, width="stretch")
+
+                if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_matrix_btn"):
+                    now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    target_sites = sorted(_melted["現場名"].dropna().unique())
+                    done = 0
+                    for s in target_sites:
+                        pattern = build_reference_pattern_from_hourly(_melted, s)
+                        if pattern and save_reference(s, pattern, now_s):
+                            done += 1
+                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    st.rerun()
+            else:
+                # ケース3：各アプリ（JOBLOOK2・タイミー・スキマクエスト等）の生データ。
+                # 列名は自動推測しつつ、プルダウンで選び直せるようにする。
+                st.caption(
+                    f"{len(actual_raw)} 行 ／ 認識した列：{', '.join(actual_cols[:12])}"
+                    + ("…" if len(actual_cols) > 12 else "")
+                    + "（各アプリの生データとして認識しました。列を確認・"
+                      "選び直してください）")
+
+                ac1, ac2, ac3, ac4 = st.columns(4)
+                c_site = ac1.selectbox(
+                    "現場の列", actual_cols,
+                    index=actual_cols.index(guess_col(
+                        actual_cols, ["現場", "事業所", "拠点", "管理用ラベル"]))
+                    if guess_col(actual_cols, ["現場", "事業所", "拠点", "管理用ラベル"])
+                    in actual_cols else 0,
+                    key="ac_site")
+                c_date = ac2.selectbox(
+                    "日付の列", actual_cols,
+                    index=actual_cols.index(guess_col(
+                        actual_cols, ["日付", "勤務日", "求人日"]))
+                    if guess_col(actual_cols, ["日付", "勤務日", "求人日"]) in actual_cols
+                    else 0,
+                    key="ac_date")
+                c_start = ac3.selectbox(
+                    "出勤時刻の列", actual_cols,
+                    index=actual_cols.index(guess_col(
+                        actual_cols, ["出勤", "開始", "チェックイン"]))
+                    if guess_col(actual_cols, ["出勤", "開始", "チェックイン"]) in actual_cols
+                    else 0,
+                    key="ac_start")
+                c_end = ac4.selectbox(
+                    "退勤時刻の列", actual_cols,
+                    index=actual_cols.index(guess_col(
+                        actual_cols, ["退勤", "終了", "チェックアウト"]))
+                    if guess_col(actual_cols, ["退勤", "終了", "チェックアウト"]) in actual_cols
+                    else 0,
+                    key="ac_end")
+
+                _preview = actual_raw[[c_site, c_date, c_start, c_end]].head(5).rename(
+                    columns={c_site: "現場", c_date: "日付", c_start: "開始", c_end: "終了"})
+                st.caption("取り込み前のプレビュー（先頭5件）：氏名・現場名等が正しく"
+                           "入っているか確認してください。")
+                st.dataframe(_preview, hide_index=True, width="stretch")
+
+                if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_raw_btn"):
+                    actual_df = actual_raw.rename(columns={
+                        c_site: "現場", c_date: "日付", c_start: "開始", c_end: "終了",
+                    })[["現場", "日付", "開始", "終了"]].dropna()
+                    now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    target_sites = sorted(actual_df["現場"].dropna().unique())
+                    done = 0
+                    for s in target_sites:
+                        pattern = build_reference_pattern(actual_df, s)
                         if pattern and save_reference(s, pattern, now_s):
                             done += 1
                     st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
