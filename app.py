@@ -34,7 +34,9 @@ from data_backend import (
 )
 from matching import (
     build_suggestions, build_board, build_hour_breakdown,
-    build_reference_pattern, reference_df_to_array,
+    build_reference_pattern_from_hourly, reference_df_to_array,
+    build_staff_dice_rows, build_seat_grid, build_daily_dice_from_confirmed,
+    generate_seat_list, annotate_seat_list_with_occupancy,
 )
 from line_notify import send_confirmation
 
@@ -181,6 +183,129 @@ def render_board_html(labels, counts, pendings):
     return "".join(parts)
 
 
+def render_dice_matrix_html(reference_heads, rows):
+    """
+    「現場×日付」の実際のダイス表：縦にスタッフ名（1人1行）、横に
+    47時間帯（0〜47時、日またぎ対応）を並べたマトリクス。
+    一番上に「お手本」の行を置き、見比べながら確認できるようにする。
+
+    rows … build_staff_dice_rows() が返す、1人1行のデータのリスト
+    """
+    active = set(h for h in range(48) if reference_heads[h] > 0)
+    for row in rows:
+        active |= set(h for h in range(48) if row["hours"][h] > 0)
+    if active:
+        lo = max(0, min(active) - 2)
+        hi = min(47, max(active) + 2)
+    else:
+        lo, hi = 6, 23
+    hours = list(range(lo, hi + 1))
+
+    def hour_label(h):
+        return f"{h % 24}時" + ("+1" if h >= 24 else "")
+
+    def fmt(v):
+        return "" if v == 0 else (str(int(v)) if v == int(v) else f"{v:.1f}")
+
+    def esc(v):
+        return html_lib.escape(str(v))
+
+    parts = ['<div style="overflow-x:auto;">'
+             '<table style="border-collapse:collapse;font-size:12px;">']
+    parts.append('<tr><th style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#f5f5f5;text-align:left;position:sticky;left:0;'
+                 'z-index:1;">氏名</th>')
+    for h in hours:
+        parts.append(f'<th style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#f5f5f5;white-space:nowrap;">{hour_label(h)}</th>')
+    parts.append('</tr>')
+
+    if any(v > 0 for v in reference_heads):
+        parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                     'background:#eef2fb;font-weight:bold;white-space:nowrap;'
+                     'position:sticky;left:0;">お手本</td>')
+        for h in hours:
+            v = reference_heads[h]
+            parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                         f'text-align:center;background:#eef2fb;color:#3355aa;">'
+                         f'{fmt(v)}</td>')
+        parts.append('</tr>')
+
+    for row in rows:
+        is_confirmed = row["種別"] == "確定"
+        row_bg = "#e9f7ee" if is_confirmed else "#fff8e6"
+        cell_bg = "#8fd19e" if is_confirmed else "#ffe9a8"
+        badge = "確定" if is_confirmed else "希望"
+        label = (f'{esc(row["氏名"])}'
+                 f'<br><span style="font-size:10px;color:#666;">{badge}</span>')
+        parts.append(f'<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:{row_bg};font-weight:bold;white-space:nowrap;'
+                     f'position:sticky;left:0;">{label}</td>')
+        for h in hours:
+            v = row["hours"][h]
+            bg = cell_bg if v > 0 else "#ffffff"
+            parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                         f'text-align:center;background:{bg};">{fmt(v)}</td>')
+        parts.append('</tr>')
+
+    parts.append('</table></div>')
+    return "".join(parts)
+
+
+def render_seat_grid_html(seat_counts, occupancy, hours):
+    """
+    「座席番号（縦）× 時間帯（横）」の試作マス目を表示する。
+    座席1つ1つのマスに、氏名と状態（確定／希望／希望(超過)）を表示する。
+    """
+    def esc(v):
+        return html_lib.escape(str(v))
+
+    max_seats = max([seat_counts[h] for h in hours] + [0])
+    # 超過枠も含めた最大座席番号を求める
+    for (h, seat_no) in occupancy:
+        if h in hours:
+            max_seats = max(max_seats, seat_no)
+
+    def hour_label(h):
+        return f"{h % 24}時" + ("+1" if h >= 24 else "")
+
+    color_map = {"確定": "#8fd19e", "希望": "#ffe9a8", "希望(超過)": "#f3c6c6"}
+
+    parts = ['<div style="overflow-x:auto;">'
+             '<table style="border-collapse:collapse;font-size:12px;">']
+    parts.append('<tr><th style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#f5f5f5;text-align:left;position:sticky;left:0;'
+                 'z-index:1;">座席</th>')
+    for h in hours:
+        parts.append(f'<th style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#f5f5f5;white-space:nowrap;">{hour_label(h)}</th>')
+    parts.append('</tr>')
+
+    for seat_no in range(1, max_seats + 1):
+        parts.append(f'<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#fafafa;font-weight:bold;white-space:nowrap;'
+                     f'position:sticky;left:0;">座席{seat_no}</td>')
+        for h in hours:
+            info = occupancy.get((h, seat_no))
+            is_slot = seat_no <= seat_counts[h]
+            if info:
+                bg = color_map.get(info["状態"], "#ffffff")
+                text = f'{esc(info["氏名"])}<br><span style="font-size:9px;color:#666;">{esc(info["状態"])}</span>'
+            elif is_slot:
+                bg = "#ffffff"
+                text = '<span style="color:#bbb;">空席</span>'
+            else:
+                bg = "#f0f0f0"
+                text = ""
+            parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                         f'text-align:center;background:{bg};min-width:56px;'
+                         f'vertical-align:top;">{text}</td>')
+        parts.append('</tr>')
+
+    parts.append('</table></div>')
+    return "".join(parts)
+
+
 st.set_page_config(page_title="シフト希望マッチング", layout="wide")
 st.title("🧩 シフト希望マッチング")
 
@@ -224,80 +349,182 @@ else:
 
     reference_df = load_reference()
 
-    st.markdown("#### 🔍 マスをクリックする感覚で、時間帯ごとの内訳を見る")
+    st.markdown("#### 🎲 現場×日付の実際のダイス表（1人1行）")
     st.caption(
-        "上の盤面は1日単位の合計人数ですが、こちらは選んだ現場・日付を"
-        "1時間刻み（日またぎの勤務は翌日側まで延長）で分解して表示します。"
-        "「お手本」は、下の「実績データの取り込み」で作成した、この現場の"
-        "いつもの人数パターンです。お手本と見比べながら、少しずつ希望を"
-        "確定に当てはめてください。")
+        "縦にスタッフ名、横に47時間帯（0〜47時、日またぎ対応）を並べた"
+        "本物のダイス表です。「お手本」は、下の「実績データの取り込み」で"
+        "作成した、この現場のいつもの人数パターンです。希望の行を見て、"
+        "その場でボタンを押せば確定できます。")
     hc1, hc2 = st.columns(2)
     _drill_site = hc1.selectbox(
         "現場を選択", list(labels.index) if len(labels.index) else [], key="drill_site")
     _drill_date = hc2.selectbox(
         "日付を選択", list(labels.columns) if len(labels.columns) else [], key="drill_date")
+
     if _drill_site and _drill_date:
-        _c_heads, _p_heads, _c_names, _p_names = build_hour_breakdown(
-            confirmed_df, wishes_df, _drill_site, _drill_date)
         _ref_heads = reference_df_to_array(reference_df, _drill_site)
+        _dice_rows = build_staff_dice_rows(
+            confirmed_df, wishes_df, _drill_site, _drill_date)
         st.markdown(
-            render_hourly_html(_c_heads, _p_heads, _c_names, _p_names, _ref_heads),
+            render_dice_matrix_html(_ref_heads, _dice_rows),
             unsafe_allow_html=True)
+
+        with st.expander("🪑 座席番号でのマッチング（試作・1現場ぶん）", expanded=True):
+            st.caption(
+                "お手本ダイスの人数から、1時間ごとに独立した座席番号を作り、"
+                "確定シフト・未処理の希望をその座席に当てはめた試作版です。"
+                "座席が足りない場合は「希望(超過)」として別枠に表示します。"
+                "座席1つ1つには `日付_時間帯_座席番号_現場名` というIDが"
+                "内部的に付いています。")
+            _seat_counts, _occupancy = build_seat_grid(
+                _ref_heads, confirmed_df, wishes_df, _drill_site, _drill_date)
+            _active_hours = [h for h in range(48)
+                             if _seat_counts[h] > 0
+                             or any(hh == h for (hh, _) in _occupancy)]
+            if _active_hours:
+                _lo = max(0, min(_active_hours) - 2)
+                _hi = min(47, max(_active_hours) + 2)
+                _seat_hours = list(range(_lo, _hi + 1))
+            else:
+                _seat_hours = list(range(6, 24))
+            st.markdown(
+                render_seat_grid_html(_seat_counts, _occupancy, _seat_hours),
+                unsafe_allow_html=True)
+
+        _wish_rows = [r for r in _dice_rows if r["種別"] == "希望"]
+        if _wish_rows:
+            st.markdown("###### この現場・日付の希望を確定する")
+
+            def _wish_seat_status(wish_id):
+                """この希望が、座席の試作結果でどう扱われたか（希望／希望(超過)）を調べる。"""
+                for info in _occupancy.values():
+                    if info.get("wish_id") == wish_id:
+                        return info.get("状態", "希望")
+                return "希望"
+
+            for r in _wish_rows:
+                _status = _wish_seat_status(r["wish_id"])
+                _is_over = "超過" in _status
+                wcol1, wcol2 = st.columns([4, 1])
+                if _is_over:
+                    wcol1.write(
+                        f"⚠️ **{r['氏名']}**　{_drill_date} {r['開始']}〜{r['終了']}")
+                    wcol1.caption(
+                        "お手本の座席数を超えている希望です。増員として確定するか、"
+                        "見送るか判断してください。")
+                else:
+                    wcol1.write(
+                        f"**{r['氏名']}**　{_drill_date} {r['開始']}〜{r['終了']}")
+                _btn_label = "⚠️ 超過のまま確定する" if _is_over else "✅ 確定する"
+                if wcol2.button(_btn_label, key=f"dice_confirm_{r['wish_id']}"):
+                    append_confirmed({
+                        "shift_id": r["wish_id"],
+                        "氏名": r["氏名"],
+                        "line_user_id": wishes_df.loc[
+                            wishes_df["wish_id"] == r["wish_id"], "line_user_id"
+                        ].iloc[0] if (wishes_df["wish_id"] == r["wish_id"]).any() else "",
+                        "現場": _drill_site,
+                        "日付": _drill_date,
+                        "開始": r["開始"],
+                        "終了": r["終了"],
+                        "マッチング方法": "増員（お手本超過）" if _is_over else "自動",
+                        "確定日時": "",
+                    })
+                    update_wish_status(r["wish_id"], "マッチ済", _drill_site)
+                    _line_uid = wishes_df.loc[
+                        wishes_df["wish_id"] == r["wish_id"], "line_user_id"
+                    ].iloc[0] if (wishes_df["wish_id"] == r["wish_id"]).any() else ""
+                    _ok, _msg = send_confirmation(
+                        _line_uid,
+                        f"シフトが確定しました。\n{_drill_date} {r['開始']}〜{r['終了']}\n"
+                        f"現場：{_drill_site}")
+                    if _is_over:
+                        st.warning(
+                            f"⚠️ {r['氏名']}さんを、お手本の座席数を超えた"
+                            f"「増員」として確定しました。{_msg}")
+                    else:
+                        st.success(f"{r['氏名']}さんを確定しました。{_msg}")
+                    st.rerun()
 
     with st.expander("📥 実績データの取り込み（お手本ダイスの作成）"):
         st.caption(
-            "過去（例：直近1週間）の実際の勤怠データ（現場・日付・出勤時刻・"
-            "退勤時刻の列を含むCSV）を取り込むと、その現場の「いつもの人数"
-            "パターン」を自動で計算し、お手本ダイスとして保存します。"
-            "曜日は区別せず、取り込んだ期間全体の1日あたり平均で近似する"
-            "簡易版です（第一弾）。同じ現場を取り込み直すと、内容は最新の"
-            "ものに置き換わります。")
+            "前の特許用アプリの「🎲 時間帯別ダイス」内にある"
+            "「📤 お手本ダイス用データの書き出し」で作ったCSV"
+            "（現場名・日付・時間帯・頭数の4列）を、そのままアップロード"
+            "してください。列名を選び直す必要はありません。複数日ぶんが"
+            "含まれていれば、日数で割って「1日あたり平均」にします"
+            "（曜日は区別しない簡易版です）。同じ現場を取り込み直すと、"
+            "内容は最新のものに置き換わります。")
         actual_file = st.file_uploader(
-            "実績CSV", type=["csv"], key="actual_upload")
+            "お手本ダイス用CSV", type=["csv"], key="actual_upload")
         if actual_file:
             try:
                 actual_raw = pd.read_csv(actual_file, encoding="utf-8-sig", dtype=str)
             except UnicodeDecodeError:
                 actual_file.seek(0)
                 actual_raw = pd.read_csv(actual_file, encoding="cp932", dtype=str)
-            actual_cols = list(actual_raw.columns)
-            st.caption(f"{len(actual_raw)} 行 ／ 認識した列：{', '.join(actual_cols[:12])}")
 
-            ac1, ac2, ac3, ac4 = st.columns(4)
-            c_site = ac1.selectbox(
-                "現場の列", actual_cols,
-                index=actual_cols.index(guess_col(actual_cols, ["現場", "事業所", "拠点"]))
-                if guess_col(actual_cols, ["現場", "事業所", "拠点"]) in actual_cols else 0,
-                key="ac_site")
-            c_date = ac2.selectbox(
-                "日付の列", actual_cols,
-                index=actual_cols.index(guess_col(actual_cols, ["日付", "勤務日"]))
-                if guess_col(actual_cols, ["日付", "勤務日"]) in actual_cols else 0,
-                key="ac_date")
-            c_start = ac3.selectbox(
-                "出勤時刻の列", actual_cols,
-                index=actual_cols.index(guess_col(actual_cols, ["出勤", "開始"]))
-                if guess_col(actual_cols, ["出勤", "開始"]) in actual_cols else 0,
-                key="ac_start")
-            c_end = ac4.selectbox(
-                "退勤時刻の列", actual_cols,
-                index=actual_cols.index(guess_col(actual_cols, ["退勤", "終了"]))
-                if guess_col(actual_cols, ["退勤", "終了"]) in actual_cols else 0,
-                key="ac_end")
+            required_cols = {"現場名", "日付", "時間帯", "頭数"}
+            if not required_cols.issubset(set(actual_raw.columns)):
+                st.error(
+                    "必要な列（現場名・日付・時間帯・頭数）が見つかりません。"
+                    f"認識した列：{', '.join(actual_raw.columns)}。"
+                    "前の特許用アプリの書き出し機能で作ったCSVをそのまま"
+                    "使ってください。")
+            else:
+                st.caption(
+                    f"{len(actual_raw)} 行／"
+                    f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました。")
+                st.dataframe(actual_raw.head(10), hide_index=True, width="stretch")
 
-            if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
-                actual_df = actual_raw.rename(columns={
-                    c_site: "現場", c_date: "日付", c_start: "開始", c_end: "終了",
-                })[["現場", "日付", "開始", "終了"]].dropna()
-                now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
-                target_sites = sorted(actual_df["現場"].dropna().unique())
-                done = 0
-                for s in target_sites:
-                    pattern = build_reference_pattern(actual_df, s)
-                    if pattern and save_reference(s, pattern, now_s):
-                        done += 1
-                st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
-                st.rerun()
+                if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
+                    now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    target_sites = sorted(actual_raw["現場名"].dropna().unique())
+                    done = 0
+                    for s in target_sites:
+                        pattern = build_reference_pattern_from_hourly(actual_raw, s)
+                        if pattern and save_reference(s, pattern, now_s):
+                            done += 1
+                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    st.rerun()
+
+    with st.expander("🪑 座席番号の一括生成"):
+        st.caption(
+            "登録済みの「お手本ダイス」から、指定した日付ぶんの座席番号"
+            "（現場・日付・時間帯・座席番号・座席IDの一覧）を、"
+            "登録されている全現場について一気に作ります。座席は"
+            "1時間ごとに独立していて、その時間帯のお手本人数（四捨五入）ぶん"
+            "だけ作られます。まだ誰も割り当てられていない「空席リスト」です。")
+        _seat_gen_dates = st.text_area(
+            "対象日付（1行に1つ、YYYY-MM-DD形式）",
+            value=datetime.now().strftime("%Y-%m-%d"), height=80,
+            help="複数の日付をまとめて生成したい場合は、改行で区切って"
+                 "何行でも入力してください。")
+        if st.button("🪑 この日付ぶんの座席を一括生成する", key="gen_seat_list_btn"):
+            _target_dates = [d.strip() for d in _seat_gen_dates.splitlines() if d.strip()]
+            _reference_df_all = load_reference()
+            _seat_list = generate_seat_list(_reference_df_all, _target_dates)
+            if _seat_list.empty:
+                st.warning(
+                    "座席が1件も生成されませんでした。お手本ダイスが"
+                    "登録されているか確認してください。")
+            else:
+                _seat_list = annotate_seat_list_with_occupancy(
+                    _seat_list, _reference_df_all, confirmed_df, wishes_df)
+                _n_filled = int((_seat_list["状態"] != "空席").sum())
+                st.success(
+                    f"✅ {len(_target_dates)} 日ぶん・{_seat_list['現場名'].nunique()} "
+                    f"現場ぶん、合計 {len(_seat_list)} 席を生成しました"
+                    f"（うち {_n_filled} 席に申請者がいます）。")
+                st.caption(
+                    "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
+                    "その座席の申請者が分かるようになっています。")
+                st.dataframe(_seat_list, hide_index=True, width="stretch")
+                _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 座席リストのCSVをダウンロード", _seat_list_csv,
+                    file_name=f"座席リスト_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="seat_list_csv")
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
@@ -355,6 +582,40 @@ if confirmed_df.empty:
     st.info("まだ確定したシフトはありません。")
 else:
     st.dataframe(confirmed_df, hide_index=True, width="stretch")
+
+    with st.expander("📤 確定シフトを47時間帯ダイス表として書き出す"):
+        st.caption(
+            "確定したシフトから、現場ごと・1日単位の47時間帯ダイス表を"
+            "作ります。前の特許用アプリの書き出しと同じ形式なので、"
+            "運用時に読み込んで実績として使ったり、このアプリの"
+            "「実績データの取り込み」に読み込ませてお手本を更新し直したり"
+            "できます。")
+        _daily_long = build_daily_dice_from_confirmed(confirmed_df)
+        if _daily_long.empty:
+            st.info("まだダイス表にできる確定シフトがありません。")
+        else:
+            _dtab1, _dtab2 = st.tabs(
+                ["📋 縦長形式（取り込み用）", "🎲 マトリクス形式（1日1行・47時間帯）"])
+            with _dtab1:
+                st.dataframe(_daily_long.round(2), hide_index=True, width="stretch")
+                _daily_long_csv = _daily_long.round(2).to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 縦長形式のCSVをダウンロード", _daily_long_csv,
+                    file_name=f"確定シフトダイス_縦長_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="daily_dice_long")
+            with _dtab2:
+                _daily_matrix = _daily_long.pivot_table(
+                    index=["現場名", "日付"], columns="時間帯", values="頭数",
+                    fill_value=0).reset_index()
+                _daily_matrix.columns = [
+                    str(c) if isinstance(c, str) else f"{c}時"
+                    for c in _daily_matrix.columns]
+                st.dataframe(_daily_matrix.round(2), hide_index=True, width="stretch")
+                _daily_matrix_csv = _daily_matrix.round(2).to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 マトリクス形式のCSVをダウンロード", _daily_matrix_csv,
+                    file_name=f"確定シフトダイス_マトリクス_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="daily_dice_matrix")
 
 with st.expander("🧑‍🤝‍🧑 現場マスタ（エリア設定）"):
     st.caption("同じエリアの現場同士が、近場スライドの候補になります。")
