@@ -21,14 +21,70 @@ st.secrets に以下が設定されていれば「本番モード」（Googleス
   SHEET_ID = "スプレッドシートのID"
   LINE_CHANNEL_ACCESS_TOKEN = "LINEのチャネルアクセストークン"
 """
+import html as html_lib
+
 import streamlit as st
 
 from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
 )
-from matching import build_suggestions
+from matching import build_suggestions, build_board
 from line_notify import send_confirmation
+
+
+def render_board_html(labels, counts, pendings):
+    """
+    「現場 × 日付」の盤面を、色付きのHTML表として組み立てる。
+      緑の濃さ … 確定人数が多いほど濃くなる
+      黄色    … 確定はまだ無いが、未処理の希望がある（要対応の目印）
+    """
+    def esc(v):
+        return html_lib.escape(str(v))
+
+    parts = ['<div style="overflow-x:auto;">'
+             '<table style="border-collapse:collapse;font-size:13px;width:100%;">']
+    parts.append('<tr>')
+    parts.append(
+        '<th style="border:1px solid #ddd;padding:8px;background:#f5f5f5;'
+        'position:sticky;left:0;z-index:1;text-align:left;">現場＼日付</th>')
+    for date in labels.columns:
+        short = esc(date[5:]) if len(date) >= 5 else esc(date)
+        parts.append(
+            f'<th style="border:1px solid #ddd;padding:8px;background:#f5f5f5;'
+            f'white-space:nowrap;">{short}</th>')
+    parts.append('</tr>')
+
+    for site in labels.index:
+        parts.append('<tr>')
+        parts.append(
+            f'<td style="border:1px solid #ddd;padding:8px;background:#fafafa;'
+            f'font-weight:bold;white-space:nowrap;position:sticky;left:0;">'
+            f'{esc(site)}</td>')
+        for date in labels.columns:
+            c = int(counts.loc[site, date])
+            p = int(pendings.loc[site, date])
+            label = esc(labels.loc[site, date])
+            if c >= 3:
+                bg = "#8fd19e"
+            elif c >= 1:
+                bg = "#d9f0df"
+            elif p >= 1:
+                bg = "#ffe9a8"
+            else:
+                bg = "#ffffff"
+            parts.append(
+                f'<td style="border:1px solid #ddd;padding:8px;text-align:center;'
+                f'background:{bg};white-space:nowrap;">{label}</td>')
+        parts.append('</tr>')
+
+    parts.append('</table></div>')
+    parts.append(
+        '<p style="font-size:12px;color:#666;margin-top:8px;">'
+        '色の濃い緑ほど確定人数が多い現場・日付です。黄色は、確定はまだ無いが'
+        '未処理の希望が来ているマス（対応が必要）です。</p>')
+    return "".join(parts)
+
 
 st.set_page_config(page_title="シフト希望マッチング", layout="wide")
 st.title("🧩 シフト希望マッチング")
@@ -58,6 +114,18 @@ c1, c2, c3 = st.columns(3)
 c1.metric("未処理の希望", int((wishes_df["ステータス"] == "未処理").sum()))
 c2.metric("マッチ済み", int((wishes_df["ステータス"] == "マッチ済").sum()))
 c3.metric("登録されている現場数", len(sites_df))
+
+st.markdown("---")
+st.header("📊 現場×日付の盤面")
+st.caption("今日から2週間分の、現場ごとの確定・希望状況を一覧できます。")
+
+_board_days = st.slider("表示する日数", 7, 30, 14, key="board_days")
+labels, counts, pendings = build_board(wishes_df, confirmed_df, sites_df, days_ahead=_board_days)
+
+if sites_df.empty:
+    st.info("現場マスタに現場が登録されていません。")
+else:
+    st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
