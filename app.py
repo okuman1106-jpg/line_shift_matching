@@ -29,8 +29,60 @@ from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
 )
-from matching import build_suggestions, build_board
+from matching import build_suggestions, build_board, build_hour_breakdown
 from line_notify import send_confirmation
+
+
+def render_hourly_html(confirmed_heads, pending_heads):
+    """
+    0〜47時間帯の確定・希望人数を、ダイス表示と同じ考え方（1時間ごとの
+    マス）で、色付きの2行の表として組み立てる。動きがある時間帯の
+    前後だけを表示し、テーブルが無駄に横長にならないようにする。
+    """
+    active = [h for h in range(48)
+              if confirmed_heads[h] > 0 or pending_heads[h] > 0]
+    if active:
+        lo = max(0, min(active) - 2)
+        hi = min(47, max(active) + 2)
+    else:
+        lo, hi = 6, 23
+    hours = list(range(lo, hi + 1))
+
+    def hour_label(h):
+        return f"{h % 24}時" + ("+1" if h >= 24 else "")
+
+    def fmt(v):
+        return "" if v == 0 else (str(int(v)) if v == int(v) else f"{v:.1f}")
+
+    parts = ['<div style="overflow-x:auto;">'
+             '<table style="border-collapse:collapse;font-size:12px;">']
+    parts.append('<tr><th style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#f5f5f5;text-align:left;">時間帯</th>')
+    for h in hours:
+        parts.append(f'<th style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#f5f5f5;white-space:nowrap;">{hour_label(h)}</th>')
+    parts.append('</tr>')
+
+    parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#fafafa;font-weight:bold;white-space:nowrap;">確定</td>')
+    for h in hours:
+        v = confirmed_heads[h]
+        bg = "#8fd19e" if v >= 2 else ("#d9f0df" if v > 0 else "#ffffff")
+        parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                     f'text-align:center;background:{bg};">{fmt(v)}</td>')
+    parts.append('</tr>')
+
+    parts.append('<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#fafafa;font-weight:bold;white-space:nowrap;">希望</td>')
+    for h in hours:
+        v = pending_heads[h]
+        bg = "#ffe9a8" if v > 0 else "#ffffff"
+        parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                     f'text-align:center;background:{bg};">{fmt(v)}</td>')
+    parts.append('</tr>')
+
+    parts.append('</table></div>')
+    return "".join(parts)
 
 
 def render_board_html(labels, counts, pendings):
@@ -126,6 +178,21 @@ if sites_df.empty:
     st.info("現場マスタに現場が登録されていません。")
 else:
     st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
+
+    st.markdown("#### 🔍 マスをクリックする感覚で、時間帯ごとの内訳を見る")
+    st.caption(
+        "上の盤面は1日単位の合計人数ですが、こちらは選んだ現場・日付を"
+        "1時間刻み（日またぎの勤務は翌日側まで延長）で分解して表示します。"
+        "どの時間帯に人が足りている／足りていないかが分かります。")
+    hc1, hc2 = st.columns(2)
+    _drill_site = hc1.selectbox(
+        "現場を選択", list(labels.index) if len(labels.index) else [], key="drill_site")
+    _drill_date = hc2.selectbox(
+        "日付を選択", list(labels.columns) if len(labels.columns) else [], key="drill_date")
+    if _drill_site and _drill_date:
+        _c_heads, _p_heads = build_hour_breakdown(
+            confirmed_df, wishes_df, _drill_site, _drill_date)
+        st.markdown(render_hourly_html(_c_heads, _p_heads), unsafe_allow_html=True)
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
