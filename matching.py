@@ -264,3 +264,53 @@ def build_hour_breakdown(confirmed_df: pd.DataFrame, wishes_df: pd.DataFrame,
                         pending_names[h].append(name)
 
     return confirmed_heads, pending_heads, confirmed_names, pending_names
+
+
+def build_reference_pattern(actual_df: pd.DataFrame, site: str):
+    """
+    実績データ（1行＝1回の勤務。列：現場・日付・開始・終了）から、
+    指定した現場の「お手本ダイス」を作る。
+
+    直近の実績をそのまま使う方式：アップロードされたデータに含まれる
+    日数で48時間帯ごとの頭数を合計し、日数で割って「1日あたりの平均的な
+    頭数パターン」にする（「週単位でやってみる」の第一弾として、
+    曜日は区別せず、期間全体の単純平均で近似する）。
+
+    戻り値：{時間帯(0〜47): 基準人数(float)} の辞書（0の時間帯は含まない）
+    """
+    rows = actual_df[actual_df["現場"] == site]
+    if rows.empty:
+        return {}
+
+    n_days = rows["日付"].nunique() or 1
+    totals = [0.0] * 48
+    for _, r in rows.iterrows():
+        try:
+            cells = expand_to_hour_bands(r["開始"], r["終了"])
+        except Exception:
+            continue
+        for h, minutes in cells.items():
+            if 0 <= h < 48:
+                totals[h] += minutes / 60.0
+
+    return {h: totals[h] / n_days for h in range(48) if totals[h] > 0}
+
+
+def reference_df_to_array(reference_df: pd.DataFrame, site: str):
+    """
+    保存済みの「基準パターン」データ（現場・時間帯・基準人数の表）から、
+    指定した現場の48時間帯分の配列を取り出す。
+    """
+    arr = [0.0] * 48
+    if reference_df.empty:
+        return arr
+    rows = reference_df[reference_df["現場"] == site]
+    for _, r in rows.iterrows():
+        try:
+            h = int(r["時間帯"])
+            v = float(r["基準人数"])
+        except (ValueError, TypeError):
+            continue
+        if 0 <= h < 48:
+            arr[h] = v
+    return arr
