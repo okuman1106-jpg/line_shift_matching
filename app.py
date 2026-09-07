@@ -32,13 +32,15 @@ from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, append_confirmed, seed_demo_data,
     load_reference, save_reference, save_reference_bulk,
+    load_aliases, add_alias,
 )
 from matching import (
     build_suggestions, build_board, build_hour_breakdown,
     build_reference_pattern, build_reference_pattern_from_hourly,
-    reference_df_to_array,
+    reference_df_to_array, detect_period_label, list_reference_periods,
     build_staff_dice_rows, build_seat_grid, build_daily_dice_from_confirmed,
     generate_seat_list, annotate_seat_list_with_occupancy,
+    normalize_site_name, find_unmatched_site_names,
 )
 from line_notify import send_confirmation
 
@@ -308,6 +310,36 @@ def render_seat_grid_html(seat_counts, occupancy, hours):
     return "".join(parts)
 
 
+def render_alias_helper(raw_names, sites_df, aliases_df, key_prefix):
+    """
+    アップロードされたデータの現場名のうち、現場マスタに無いもの
+    （表記ゆれの可能性があるもの）を検出し、その場でエイリアス登録
+    できるミニUIを表示する。登録すると、正規化した結果が次の画面
+    更新から反映される。
+    """
+    unmatched = find_unmatched_site_names(raw_names, sites_df, aliases_df)
+    if not unmatched:
+        return
+    st.warning(
+        f"⚠️ 現場マスタに見つからない現場名が {len(unmatched)} 件あります。"
+        "表記ゆれの可能性があります。下で対応する正式な現場名を選んで"
+        "登録すると、次回から自動的に読み替えられます。")
+    site_options = list(sites_df["現場名"]) if not sites_df.empty else []
+    for i, name in enumerate(unmatched):
+        ac1, ac2, ac3 = st.columns([2, 2, 1])
+        ac1.write(f"`{name}`")
+        if site_options:
+            selected = ac2.selectbox(
+                "対応する正式な現場名", site_options,
+                key=f"{key_prefix}_alias_target_{i}", label_visibility="collapsed")
+            if ac3.button("登録", key=f"{key_prefix}_alias_btn_{i}"):
+                if add_alias(name, selected):
+                    st.success(f"「{name}」→「{selected}」として登録しました。")
+                    st.rerun()
+        else:
+            ac2.caption("現場マスタが空です。先に現場を登録してください。")
+
+
 st.set_page_config(page_title="シフト希望マッチング", layout="wide")
 st.title("🧩 シフト希望マッチング")
 
@@ -329,6 +361,7 @@ st.caption(
 wishes_df = load_wishes()
 sites_df = load_sites()
 confirmed_df = load_confirmed()
+aliases_df = load_aliases()
 
 st.markdown("---")
 
@@ -478,17 +511,32 @@ else:
                     f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました"
                     "（縦長形式として認識しました）。")
                 st.dataframe(actual_raw.head(10), hide_index=True, width="stretch")
+                render_alias_helper(
+                    actual_raw["現場名"], sites_df, aliases_df, "long")
+
+                _detected_period = detect_period_label(actual_raw["日付"])
+                _period_input = st.text_input(
+                    "この実績の対象期間（例：2026-02）", value=_detected_period,
+                    key="period_input_long",
+                    help="自動でデータから読み取った期間です。違っていれば書き換えて"
+                         "ください。同じ現場でも対象期間が違えば、両方のお手本が"
+                         "残るので、あとで年ごとに見比べられます。")
 
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_btn"):
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    target_sites = sorted(actual_raw["現場名"].dropna().unique())
+                    _normalized = actual_raw.copy()
+                    _normalized["現場名"] = _normalized["現場名"].apply(
+                        lambda n: normalize_site_name(n, aliases_df))
+                    target_sites = sorted(_normalized["現場名"].dropna().unique())
                     patterns = {}
                     for s in target_sites:
-                        pattern = build_reference_pattern_from_hourly(actual_raw, s)
+                        pattern = build_reference_pattern_from_hourly(_normalized, s)
                         if pattern:
                             patterns[s] = pattern
-                    done = save_reference_bulk(patterns, now_s)
-                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    done = save_reference_bulk(patterns, now_s, period=_period_input.strip())
+                    st.success(
+                        f"✅ {done} 現場分のお手本ダイス"
+                        f"（対象期間：{_period_input.strip() or '未設定'}）を作成・更新しました。")
                     st.rerun()
 
             elif {"現場名", "日付"}.issubset(set(actual_cols)) and _hour_cols:
@@ -507,17 +555,32 @@ else:
                     f"{actual_raw['現場名'].nunique()} 現場ぶんのデータを読み込みました"
                     "（マトリクス形式として認識し、自動的に変換しました）。")
                 st.dataframe(actual_raw.head(10), hide_index=True, width="stretch")
+                render_alias_helper(
+                    actual_raw["現場名"], sites_df, aliases_df, "matrix")
+
+                _detected_period = detect_period_label(actual_raw["日付"])
+                _period_input = st.text_input(
+                    "この実績の対象期間（例：2026-02）", value=_detected_period,
+                    key="period_input_matrix",
+                    help="自動でデータから読み取った期間です。違っていれば書き換えて"
+                         "ください。同じ現場でも対象期間が違えば、両方のお手本が"
+                         "残るので、あとで年ごとに見比べられます。")
 
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_matrix_btn"):
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    target_sites = sorted(_melted["現場名"].dropna().unique())
+                    _normalized = _melted.copy()
+                    _normalized["現場名"] = _normalized["現場名"].apply(
+                        lambda n: normalize_site_name(n, aliases_df))
+                    target_sites = sorted(_normalized["現場名"].dropna().unique())
                     patterns = {}
                     for s in target_sites:
-                        pattern = build_reference_pattern_from_hourly(_melted, s)
+                        pattern = build_reference_pattern_from_hourly(_normalized, s)
                         if pattern:
                             patterns[s] = pattern
-                    done = save_reference_bulk(patterns, now_s)
-                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    done = save_reference_bulk(patterns, now_s, period=_period_input.strip())
+                    st.success(
+                        f"✅ {done} 現場分のお手本ダイス"
+                        f"（対象期間：{_period_input.strip() or '未設定'}）を作成・更新しました。")
                     st.rerun()
             else:
                 # ケース3：各アプリ（JOBLOOK2・タイミー・スキマクエスト等）の生データ。
@@ -563,11 +626,23 @@ else:
                 st.caption("取り込み前のプレビュー（先頭5件）：氏名・現場名等が正しく"
                            "入っているか確認してください。")
                 st.dataframe(_preview, hide_index=True, width="stretch")
+                render_alias_helper(
+                    actual_raw[c_site], sites_df, aliases_df, "raw")
+
+                _detected_period = detect_period_label(actual_raw[c_date])
+                _period_input = st.text_input(
+                    "この実績の対象期間（例：2026-02）", value=_detected_period,
+                    key="period_input_raw",
+                    help="自動でデータから読み取った期間です。違っていれば書き換えて"
+                         "ください。同じ現場でも対象期間が違えば、両方のお手本が"
+                         "残るので、あとで年ごとに見比べられます。")
 
                 if st.button("📊 この内容でお手本ダイスを作成する", key="build_reference_raw_btn"):
                     actual_df = actual_raw.rename(columns={
                         c_site: "現場", c_date: "日付", c_start: "開始", c_end: "終了",
                     })[["現場", "日付", "開始", "終了"]].dropna()
+                    actual_df["現場"] = actual_df["現場"].apply(
+                        lambda n: normalize_site_name(n, aliases_df))
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
                     target_sites = sorted(actual_df["現場"].dropna().unique())
                     patterns = {}
@@ -575,9 +650,45 @@ else:
                         pattern = build_reference_pattern(actual_df, s)
                         if pattern:
                             patterns[s] = pattern
-                    done = save_reference_bulk(patterns, now_s)
-                    st.success(f"✅ {done} 現場分のお手本ダイスを作成・更新しました。")
+                    done = save_reference_bulk(patterns, now_s, period=_period_input.strip())
+                    st.success(
+                        f"✅ {done} 現場分のお手本ダイス"
+                        f"（対象期間：{_period_input.strip() or '未設定'}）を作成・更新しました。")
                     st.rerun()
+
+    with st.expander("📈 期間ごとのお手本を見比べる"):
+        st.caption(
+            "同じ現場について、複数の対象期間（例：2026年2月・2027年2月）の"
+            "お手本を取り込んでいれば、ここで並べて見比べられます。")
+        _compare_reference_df = load_reference()
+        _compare_sites = sorted(_compare_reference_df["現場"].dropna().unique()) \
+            if not _compare_reference_df.empty else []
+        _compare_site = st.selectbox(
+            "現場を選択", _compare_sites, key="compare_ref_site")
+        if _compare_site:
+            _periods = list_reference_periods(_compare_reference_df, _compare_site)
+            if len(_periods) < 2:
+                st.info(
+                    f"この現場には、まだ比較できるほど対象期間の異なる"
+                    f"お手本がありません（現在：{len(_periods)} 件）。"
+                    "別の期間のデータも取り込むと、ここで見比べられます。")
+            else:
+                _selected_periods = st.multiselect(
+                    "見比べる対象期間を選ぶ（2つ以上）", _periods,
+                    default=_periods[:2], key="compare_ref_periods")
+                if len(_selected_periods) >= 2:
+                    _compare_table = pd.DataFrame(
+                        {p: reference_df_to_array(_compare_reference_df, _compare_site, period=p)
+                         for p in _selected_periods},
+                        index=[f"{h}時" for h in range(48)]).T
+                    _active_cols = [c for c in _compare_table.columns
+                                    if _compare_table[c].sum() > 0]
+                    if _active_cols:
+                        st.dataframe(
+                            _compare_table[_active_cols].round(2),
+                            width="stretch")
+                    else:
+                        st.info("選んだ期間には、まだ数値が入っていません。")
 
     with st.expander("🪑 座席番号の一括生成"):
         st.caption(
