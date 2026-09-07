@@ -19,8 +19,10 @@ DEMO_DIR = Path(__file__).parent / "demo_data"
 DEMO_DIR.mkdir(exist_ok=True)
 
 WISH_COLUMNS = ["wish_id", "line_user_id", "氏名", "希望日", "開始", "終了",
-                "第1希望現場", "ステータス", "マッチ現場", "登録日時"]
-SITE_COLUMNS = ["現場名", "エリア"]
+                "第1希望現場", "ステータス", "マッチ現場", "登録日時",
+                "振替希望現場", "プール通知済み"]
+# 「時給」は現場ごとの基本時給（新規応募者向け）。空欄でもよい。
+SITE_COLUMNS = ["現場名", "エリア", "時給"]
 CONFIRMED_COLUMNS = ["shift_id", "氏名", "line_user_id", "現場", "日付",
                      "開始", "終了", "マッチング方法", "確定日時"]
 # 「基準パターン」＝実績データから作る、現場ごとの時間帯別お手本ダイス。
@@ -28,6 +30,10 @@ CONFIRMED_COLUMNS = ["shift_id", "氏名", "line_user_id", "現場", "日付",
 REFERENCE_COLUMNS = ["現場", "時間帯", "基準人数", "対象期間", "作成日時"]
 # 現場名の表記ゆれを吸収するための対応表（例："Kosugi 3rd" → "kosugi3rd Avenue"）
 ALIAS_COLUMNS = ["表記ゆれ", "正式名"]
+# スタッフごとの「優遇時給」。ここに載っている人だけ、現場の基本時給より
+# 優先してこちらの時給が使われる（経験者への時給アップ等）。
+# 載っていないスタッフは、現場の基本時給がそのまま適用される。
+STAFF_WAGE_COLUMNS = ["氏名", "時給", "備考"]
 
 
 def is_live_mode():
@@ -149,6 +155,36 @@ def update_wish_status(wish_id, status, match_site=""):
         df.loc[idx, "マッチ現場"] = match_site
         _save_demo("希望", df)
     load_wishes.clear()
+
+
+def update_wish_field(wish_id, field, value):
+    """
+    希望シートの該当行、指定した1つの列だけを更新する汎用関数。
+    「振替希望現場」（本人がLINEで意思表示した現場）や「プール通知済み」
+    （二重通知防止フラグ）の更新に使う。
+    """
+    if is_live_mode():
+        ws = _get_sheet("希望")
+        cell = ws.find(wish_id)
+        if cell:
+            row = cell.row
+            header = ws.row_values(1)
+            if field not in header:
+                return False
+            col = header.index(field) + 1
+            ws.update_cell(row, col, value)
+        load_wishes.clear()
+        return True
+
+    df = _load_demo("希望", WISH_COLUMNS)
+    if df.empty:
+        return False
+    idx = df.index[df["wish_id"] == wish_id]
+    if len(idx):
+        df.loc[idx, field] = value
+        _save_demo("希望", df)
+    load_wishes.clear()
+    return True
 
 
 def append_confirmed(row: dict):
@@ -340,6 +376,89 @@ def delete_alias(variant: str):
     df = df[df["表記ゆれ"] != variant]
     _save_demo("現場名エイリアス", df)
     load_aliases.clear()
+    return True
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_staff_wages():
+    """スタッフごとの優遇時給の一覧を読み込む（載っていない人は現場の基本時給を使う）。"""
+    if is_live_mode():
+        try:
+            ws = _get_sheet("スタッフ時給")
+        except Exception:
+            return pd.DataFrame(columns=STAFF_WAGE_COLUMNS)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records, dtype=str) if records else pd.DataFrame(columns=STAFF_WAGE_COLUMNS)
+        for c in STAFF_WAGE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[STAFF_WAGE_COLUMNS]
+    return _load_demo("スタッフ時給", STAFF_WAGE_COLUMNS)
+
+
+def save_staff_wage(name: str, wage: str, note: str = ""):
+    """1人ぶんの優遇時給を登録・更新する（既存があれば上書き）。"""
+    name = name.strip()
+    if not name:
+        return False
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("スタッフ時給")
+        except Exception:
+            return False
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=STAFF_WAGE_COLUMNS)
+        for c in STAFF_WAGE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[df["氏名"] != name]
+        new_row = pd.DataFrame([{"氏名": name, "時給": str(wage), "備考": note}], dtype=str)
+        df = pd.concat([df, new_row], ignore_index=True)
+        ws.clear()
+        ws.append_row(STAFF_WAGE_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[STAFF_WAGE_COLUMNS].values.tolist())
+        load_staff_wages.clear()
+        return True
+
+    df = _load_demo("スタッフ時給", STAFF_WAGE_COLUMNS)
+    df = df[df["氏名"] != name]
+    new_row = pd.DataFrame([{"氏名": name, "時給": str(wage), "備考": note}], dtype=str)
+    df = pd.concat([df, new_row], ignore_index=True)
+    _save_demo("スタッフ時給", df)
+    load_staff_wages.clear()
+    return True
+
+
+def delete_staff_wage(name: str):
+    """スタッフの優遇時給の登録を削除する（削除後は現場の基本時給に戻る）。"""
+    name = name.strip()
+    if not name:
+        return False
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("スタッフ時給")
+        except Exception:
+            return False
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=STAFF_WAGE_COLUMNS)
+        for c in STAFF_WAGE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[df["氏名"] != name]
+        ws.clear()
+        ws.append_row(STAFF_WAGE_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[STAFF_WAGE_COLUMNS].values.tolist())
+        load_staff_wages.clear()
+        return True
+
+    df = _load_demo("スタッフ時給", STAFF_WAGE_COLUMNS)
+    df = df[df["氏名"] != name]
+    _save_demo("スタッフ時給", df)
+    load_staff_wages.clear()
     return True
 
 
