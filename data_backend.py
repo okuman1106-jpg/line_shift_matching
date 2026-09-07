@@ -25,7 +25,9 @@ CONFIRMED_COLUMNS = ["shift_id", "氏名", "line_user_id", "現場", "日付",
                      "開始", "終了", "マッチング方法", "確定日時"]
 # 「基準パターン」＝実績データから作る、現場ごとの時間帯別お手本ダイス。
 # 時間帯は0〜47の通し番号（日またぎ対応）、基準人数は頭数（小数）。
-REFERENCE_COLUMNS = ["現場", "時間帯", "基準人数", "作成日時"]
+REFERENCE_COLUMNS = ["現場", "時間帯", "基準人数", "対象期間", "作成日時"]
+# 現場名の表記ゆれを吸収するための対応表（例："Kosugi 3rd" → "kosugi3rd Avenue"）
+ALIAS_COLUMNS = ["表記ゆれ", "正式名"]
 
 
 def is_live_mode():
@@ -181,7 +183,7 @@ def load_reference():
     return _load_demo("基準パターン", REFERENCE_COLUMNS)
 
 
-def save_reference(site, hour_pattern, now_str):
+def save_reference(site, hour_pattern, now_str, period=""):
     """
     1つの現場について、48時間帯分の基準人数をまとめて保存する。
     複数の現場をまとめて保存したい場合は、save_reference_bulk() を
@@ -189,16 +191,21 @@ def save_reference(site, hour_pattern, now_str):
     かかりやすいため、この関数は「1つだけ直したい」ときの用途に限る）。
     hour_pattern … {時間帯(int): 基準人数(float)} の辞書
     """
-    return save_reference_bulk({site: hour_pattern}, now_str)
+    return save_reference_bulk({site: hour_pattern}, now_str, period)
 
 
-def save_reference_bulk(patterns: dict, now_str: str):
+def save_reference_bulk(patterns: dict, now_str: str, period: str = ""):
     """
     複数の現場ぶんの基準パターンを、まとめて1回の読み書きで保存する。
     現場の数だけ通信が発生する save_reference の繰り返し呼び出しでは、
     現場数が多いとGoogle側のアクセス制限（1分あたりの読み込み回数）に
     かかりやすいため、こちらでは既存データの読み込み・書き込みを
     それぞれ1回だけで済ませる。
+
+    period … このデータの対象期間（例："2026-02"）。同じ現場でも、
+             対象期間が違えば別のお手本として両方残る（洗い替えの対象は
+             「現場・対象期間」が両方一致するものだけ）。これにより、
+             2026年2月と2027年2月のダイスを両方保存して見比べられる。
 
     patterns … {現場名: {時間帯(int): 基準人数(float)}, ...}
     戻り値：更新できた現場数
@@ -209,10 +216,14 @@ def save_reference_bulk(patterns: dict, now_str: str):
             if v > 0:
                 new_rows_list.append({
                     "現場": site, "時間帯": str(h),
-                    "基準人数": f"{v:.2f}", "作成日時": now_str,
+                    "基準人数": f"{v:.2f}", "対象期間": period,
+                    "作成日時": now_str,
                 })
     new_rows = pd.DataFrame(new_rows_list, dtype=str)
     target_sites = set(patterns.keys())
+
+    def _is_target(row_site, row_period):
+        return row_site in target_sites and row_period == period
 
     if is_live_mode():
         try:
@@ -224,7 +235,9 @@ def save_reference_bulk(patterns: dict, now_str: str):
         for c in REFERENCE_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
-        df = df[~df["現場"].isin(target_sites)]
+        _mask = df.apply(lambda r: _is_target(r["現場"], r.get("対象期間", "")), axis=1) \
+            if not df.empty else pd.Series([], dtype=bool)
+        df = df[~_mask] if not df.empty else df
         df = pd.concat([df, new_rows], ignore_index=True)
         ws.clear()
         ws.append_row(REFERENCE_COLUMNS)
@@ -234,11 +247,69 @@ def save_reference_bulk(patterns: dict, now_str: str):
         return len(target_sites)
 
     df = _load_demo("基準パターン", REFERENCE_COLUMNS)
-    df = df[~df["現場"].isin(target_sites)]
+    _mask = df.apply(lambda r: _is_target(r["現場"], r.get("対象期間", "")), axis=1) \
+        if not df.empty else pd.Series([], dtype=bool)
+    df = df[~_mask] if not df.empty else df
     df = pd.concat([df, new_rows], ignore_index=True)
     _save_demo("基準パターン", df)
     load_reference.clear()
     return len(target_sites)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_aliases():
+    """現場名の表記ゆれ対応表（表記ゆれ → 正式名）を読み込む。"""
+    if is_live_mode():
+        try:
+            ws = _get_sheet("現場名エイリアス")
+        except Exception:
+            return pd.DataFrame(columns=ALIAS_COLUMNS)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records, dtype=str) if records else pd.DataFrame(columns=ALIAS_COLUMNS)
+        for c in ALIAS_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[ALIAS_COLUMNS]
+    return _load_demo("現場名エイリアス", ALIAS_COLUMNS)
+
+
+def add_alias(variant: str, canonical: str):
+    """
+    表記ゆれ1件を対応表に追加する（既に同じ表記ゆれが登録されていれば
+    上書きする）。
+    """
+    variant = variant.strip()
+    canonical = canonical.strip()
+    if not variant or not canonical:
+        return False
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("現場名エイリアス")
+        except Exception:
+            return False
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=ALIAS_COLUMNS)
+        for c in ALIAS_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[df["表記ゆれ"] != variant]
+        new_row = pd.DataFrame([{"表記ゆれ": variant, "正式名": canonical}], dtype=str)
+        df = pd.concat([df, new_row], ignore_index=True)
+        ws.clear()
+        ws.append_row(ALIAS_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[ALIAS_COLUMNS].values.tolist())
+        load_aliases.clear()
+        return True
+
+    df = _load_demo("現場名エイリアス", ALIAS_COLUMNS)
+    df = df[df["表記ゆれ"] != variant]
+    new_row = pd.DataFrame([{"表記ゆれ": variant, "正式名": canonical}], dtype=str)
+    df = pd.concat([df, new_row], ignore_index=True)
+    _save_demo("現場名エイリアス", df)
+    load_aliases.clear()
+    return True
 
 
 def seed_demo_data():
