@@ -30,19 +30,22 @@ import streamlit as st
 
 from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
-    update_wish_status, append_confirmed, seed_demo_data,
+    update_wish_status, update_wish_field, append_confirmed, seed_demo_data,
     load_reference, save_reference, save_reference_bulk,
     load_aliases, add_alias, delete_alias,
+    load_staff_wages, save_staff_wage, delete_staff_wage,
 )
 from matching import (
-    build_suggestions, build_board, build_hour_breakdown,
+    build_suggestions, build_board, build_hour_breakdown, build_day_hourly_board,
     build_reference_pattern, build_reference_pattern_from_hourly,
     reference_df_to_array, detect_period_label, list_reference_periods,
     build_staff_dice_rows, build_seat_grid, build_daily_dice_from_confirmed,
     generate_seat_list, annotate_seat_list_with_occupancy,
     normalize_site_name, find_unmatched_site_names,
+    compute_labor_cost, compute_labor_cost_precise, get_wage_for,
+    find_pool_wishes, suggest_alternative_slots,
 )
-from line_notify import send_confirmation
+from line_notify import send_confirmation, send_pool_alternatives
 
 
 def guess_col(cols, cands):
@@ -134,23 +137,31 @@ def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_
     return "".join(parts)
 
 
-def render_board_html(labels, counts, pendings):
+def render_board_html(labels, counts, pendings, row_header="現場＼日付", col_label_fn=None):
     """
-    「現場 × 日付」の盤面を、色付きのHTML表として組み立てる。
+    「現場 × 列（日付 or 時間帯）」の盤面を、色付きのHTML表として組み立てる。
       緑の濃さ … 確定人数が多いほど濃くなる
       黄色    … 確定はまだ無いが、未処理の希望がある（要対応の目印）
+
+    col_label_fn … 列見出しの表示文字列を作る関数。指定が無ければ、
+                   日付の月日部分（例："09-10"）をそのまま使う（従来通り）。
+                   時間帯の盤面では、例えば "9時" のようなラベルを返す
+                   関数を渡す。
     """
     def esc(v):
         return html_lib.escape(str(v))
+
+    if col_label_fn is None:
+        col_label_fn = lambda c: c[5:] if len(str(c)) >= 5 else c
 
     parts = ['<div style="overflow-x:auto;">'
              '<table style="border-collapse:collapse;font-size:13px;width:100%;">']
     parts.append('<tr>')
     parts.append(
-        '<th style="border:1px solid #ddd;padding:8px;background:#f5f5f5;'
-        'position:sticky;left:0;z-index:1;text-align:left;">現場＼日付</th>')
-    for date in labels.columns:
-        short = esc(date[5:]) if len(date) >= 5 else esc(date)
+        f'<th style="border:1px solid #ddd;padding:8px;background:#f5f5f5;'
+        f'position:sticky;left:0;z-index:1;text-align:left;">{esc(row_header)}</th>')
+    for col in labels.columns:
+        short = esc(col_label_fn(col))
         parts.append(
             f'<th style="border:1px solid #ddd;padding:8px;background:#f5f5f5;'
             f'white-space:nowrap;">{short}</th>')
@@ -162,10 +173,10 @@ def render_board_html(labels, counts, pendings):
             f'<td style="border:1px solid #ddd;padding:8px;background:#fafafa;'
             f'font-weight:bold;white-space:nowrap;position:sticky;left:0;">'
             f'{esc(site)}</td>')
-        for date in labels.columns:
-            c = int(counts.loc[site, date])
-            p = int(pendings.loc[site, date])
-            label = esc(labels.loc[site, date])
+        for col in labels.columns:
+            c = float(counts.loc[site, col])
+            p = float(pendings.loc[site, col])
+            label = esc(labels.loc[site, col])
             if c >= 3:
                 bg = "#8fd19e"
             elif c >= 1:
@@ -182,7 +193,7 @@ def render_board_html(labels, counts, pendings):
     parts.append('</table></div>')
     parts.append(
         '<p style="font-size:12px;color:#666;margin-top:8px;">'
-        '色の濃い緑ほど確定人数が多い現場・日付です。黄色は、確定はまだ無いが'
+        '色の濃い緑ほど確定人数が多いマスです。黄色は、確定はまだ無いが'
         '未処理の希望が来ているマス（対応が必要）です。</p>')
     return "".join(parts)
 
@@ -362,6 +373,31 @@ wishes_df = load_wishes()
 sites_df = load_sites()
 confirmed_df = load_confirmed()
 aliases_df = load_aliases()
+staff_wages_df = load_staff_wages()
+
+with st.sidebar:
+    st.markdown("### 👤 あなたの立場")
+    _role = st.radio(
+        "立場を選んでください", ["現場担当者（ユニット長）", "承認者（社長）"],
+        key="user_role")
+    is_approver = False
+    if _role == "承認者（社長）":
+        try:
+            _approver_password = st.secrets.get("APPROVER_PASSWORD", "")
+        except Exception:
+            _approver_password = ""
+        if not _approver_password:
+            st.warning(
+                "承認者用のパスワードが設定されていません（st.secretsに"
+                "APPROVER_PASSWORDが未設定）。デモとしてそのまま進めます。")
+            is_approver = True
+        else:
+            _input_pw = st.text_input("パスワード", type="password", key="approver_pw")
+            if _input_pw == _approver_password:
+                is_approver = True
+                st.success("承認者として認証されました。")
+            elif _input_pw:
+                st.error("パスワードが違います。")
 
 st.markdown("---")
 
@@ -369,6 +405,87 @@ c1, c2, c3 = st.columns(3)
 c1.metric("未処理の希望", int((wishes_df["ステータス"] == "未処理").sum()))
 c2.metric("マッチ済み", int((wishes_df["ステータス"] == "マッチ済").sum()))
 c3.metric("登録されている現場数", len(sites_df))
+
+if is_approver:
+    st.markdown("---")
+    st.header("🏢 承認者専用：予算ビュー")
+    st.caption(
+        "確定済みシフトから、現場ごとの実働時間・人件費を集計します。"
+        "優遇時給が登録されているスタッフはその時給、それ以外は現場の"
+        "基本時給を使って計算します（どちらも未設定の場合は0円になります）。")
+
+    _cost_mode = st.radio(
+        "計算方式", ["精密（深夜・残業割増込み）", "簡易（時給×時間のみ）"],
+        key="cost_mode", horizontal=True,
+        help="「精密」は、前の特許用アプリ（人件費ダイス分析システム）と"
+             "同じ考え方で、深夜割増・残業割増を計算に含めます。")
+
+    if _cost_mode == "精密（深夜・残業割増込み）":
+        _wcol1, _wcol2 = st.columns(2)
+        _night_rate = _wcol1.slider(
+            "深夜割増（22時〜翌5時）", 0, 100, 25, step=5, key="night_rate") / 100
+        _ot_rate = _wcol2.slider(
+            "残業割増（1日8時間超）", 0, 100, 25, step=5, key="ot_rate") / 100
+        _cost_df = compute_labor_cost_precise(
+            confirmed_df, sites_df, staff_wages_df,
+            night_rate=_night_rate, ot_rate=_ot_rate)
+    else:
+        _cost_df = compute_labor_cost(confirmed_df, sites_df, staff_wages_df)
+
+    if _cost_df.empty:
+        st.info("まだ確定したシフトがありません。")
+    else:
+        _budget_summary = (
+            _cost_df.groupby("現場")
+            .agg(実働時間合計=("実働時間", "sum"), 人件費合計=("人件費", "sum"))
+            .reset_index().sort_values("現場"))
+        _total_cost = int(_budget_summary["人件費合計"].sum())
+
+        _bcol1, _bcol2 = st.columns([2, 1])
+        _budget_cap = _bcol1.number_input(
+            "今期の予算上限（円・任意）", min_value=0, value=0, step=10000,
+            key="budget_cap")
+        _bcol2.metric("確定シフト人件費 合計", f"¥{_total_cost:,}")
+        if _budget_cap > 0:
+            _over = _total_cost - _budget_cap
+            if _over > 0:
+                st.error(f"⚠️ 予算を ¥{_over:,} 超過しています。")
+            else:
+                st.success(f"✅ 予算内です（残り ¥{-_over:,}）。")
+
+        st.dataframe(_budget_summary, hide_index=True, width="stretch")
+
+        _n_no_wage = int((_cost_df["適用時給"] == 0).sum())
+        if _n_no_wage:
+            st.warning(
+                f"⚠️ 時給が未設定のまま計算されているシフトが {_n_no_wage} 件"
+                "あります（人件費が0円のまま含まれています）。下の"
+                "「現場マスタ」または「スタッフ優遇時給」で時給を"
+                "設定してください。")
+
+    with st.expander("💰 スタッフ優遇時給の管理"):
+        st.caption(
+            "経験者など、現場の基本時給より高い時給を個別に設定したい"
+            "スタッフだけをここに登録します。登録が無い人は、自動的に"
+            "現場の基本時給（現場マスタで設定）が使われます。")
+        if staff_wages_df.empty:
+            st.info("まだ優遇時給の登録はありません。")
+        else:
+            st.dataframe(staff_wages_df, hide_index=True, width="stretch")
+            for i, row in staff_wages_df.reset_index(drop=True).iterrows():
+                if st.button(f"🗑️ {row['氏名']}の登録を削除", key=f"wage_delete_{i}"):
+                    if delete_staff_wage(row["氏名"]):
+                        st.success(f"{row['氏名']}の優遇時給を削除しました。")
+                        st.rerun()
+
+        wc1, wc2, wc3 = st.columns([2, 1, 2])
+        _wage_name = wc1.text_input("氏名", key="new_wage_name")
+        _wage_amount = wc2.number_input("時給（円）", min_value=0, step=50, key="new_wage_amount")
+        _wage_note = wc3.text_input("備考（任意）", key="new_wage_note")
+        if st.button("➕ この内容で優遇時給を登録する", key="add_wage_btn"):
+            if save_staff_wage(_wage_name, _wage_amount, _wage_note):
+                st.success(f"{_wage_name}さんの優遇時給（¥{_wage_amount}）を登録しました。")
+                st.rerun()
 
 st.markdown("---")
 st.header("📊 現場×日付の盤面")
@@ -381,6 +498,40 @@ if sites_df.empty:
     st.info("現場マスタに現場が登録されていません。")
 else:
     st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### 📆 1日を選んで、全現場×47時間帯で見る")
+    st.caption(
+        "予約が増えてくると、上の「現場×日付」の盤面（1日1マスの合計）だけでは"
+        "時間帯までは分からず把握しづらくなります。こちらは日付を1つ選び、"
+        "その日の全現場を47時間帯（0〜47時、日またぎ対応）まで細かく"
+        "並べた盤面です。動きのある現場だけを自動的に表示します。")
+    _day_board_date = st.selectbox(
+        "日付を選択", list(labels.columns) if len(labels.columns) else [],
+        key="day_board_date")
+    if _day_board_date:
+        _dh_labels, _dh_counts, _dh_pendings, _dh_active_sites = build_day_hourly_board(
+            wishes_df, confirmed_df, sites_df, _day_board_date)
+        if not _dh_active_sites:
+            st.info("この日は、まだどの現場にも確定・希望の動きがありません。")
+        else:
+            _active_hours = [
+                h for h in range(48)
+                if _dh_counts[h].sum() > 0 or _dh_pendings[h].sum() > 0]
+            _lo = max(0, min(_active_hours) - 2)
+            _hi = min(47, max(_active_hours) + 2)
+            _hour_range = list(range(_lo, _hi + 1))
+
+            def _hour_col_label(h):
+                return f"{h % 24}時" + ("+1" if h >= 24 else "")
+
+            st.markdown(
+                render_board_html(
+                    _dh_labels.loc[_dh_active_sites, _hour_range],
+                    _dh_counts.loc[_dh_active_sites, _hour_range],
+                    _dh_pendings.loc[_dh_active_sites, _hour_range],
+                    row_header="現場＼時間帯", col_label_fn=_hour_col_label),
+                unsafe_allow_html=True)
 
     reference_df = load_reference()
 
@@ -809,6 +960,96 @@ else:
                             "📥 座席リストのCSVをダウンロード（マトリクス形式）", _seat_matrix_csv,
                             file_name=f"座席リスト_マトリクス_{datetime.now():%Y%m%d}.csv",
                             mime="text/csv", key="seat_matrix_csv")
+
+st.markdown("---")
+st.header("🏊 プール要員一覧（席が埋まって確定できていない希望者）")
+st.caption(
+    "第1希望の現場・時間帯が、他の人の確定によって既に席が埋まって"
+    "しまっている「未処理」の希望者を一覧にします。プール判定された"
+    "人には、自動でLINEに近場の空き現場を案内し、本人が気になる現場を"
+    "ボタンで選べます（確定は、この画面で管理者が行います）。")
+
+_reference_df_pool = load_reference()
+_pool_df = find_pool_wishes(wishes_df, confirmed_df, _reference_df_pool)
+
+if _pool_df.empty:
+    st.info("現在、席が埋まって確定できない希望者はいません。")
+else:
+    st.write(f"プール要員：{len(_pool_df)} 名")
+
+    # まだ通知していない人にだけ、自動でLINEに振替候補を案内する
+    # （毎回の画面表示のたびに再送しないよう「プール通知済み」で防ぐ）。
+    for _, prow in _pool_df.iterrows():
+        if str(prow.get("プール通知済み", "")).strip():
+            continue
+        _alts_for_notify = suggest_alternative_slots(
+            prow, sites_df, _reference_df_pool, confirmed_df, wishes_df)
+        if _alts_for_notify:
+            _wish_info = (
+                f"{prow['希望日']} {prow['開始']}〜{prow['終了']}\n"
+                f"第1希望：{prow['第1希望現場']}")
+            send_pool_alternatives(
+                prow.get("line_user_id", ""), prow["wish_id"],
+                _wish_info, _alts_for_notify)
+        update_wish_field(prow["wish_id"], "プール通知済み", "済")
+
+    # 本人がボタンで振替希望を意思表示している人を、優先して上に表示する
+    _pool_df = _pool_df.assign(
+        _has_transfer=lambda d: d["振替希望現場"].astype(str).str.strip() != ""
+    ).sort_values("_has_transfer", ascending=False)
+
+    for _, prow in _pool_df.iterrows():
+        with st.container(border=True):
+            _transfer_wish = str(prow.get("振替希望現場", "")).strip()
+            if _transfer_wish:
+                st.write(
+                    f"⭐ **{prow['氏名']}**　第1希望：{prow['第1希望現場']}　"
+                    f"{prow['希望日']} {prow['開始']}〜{prow['終了']}")
+                st.caption(f"本人が「{_transfer_wish}」を希望しています。")
+            else:
+                st.write(
+                    f"**{prow['氏名']}**　第1希望：{prow['第1希望現場']}　"
+                    f"{prow['希望日']} {prow['開始']}〜{prow['終了']}")
+            _alts = suggest_alternative_slots(
+                prow, sites_df, _reference_df_pool, confirmed_df, wishes_df)
+            if not _alts:
+                st.caption("同じエリアに、空いている現場が見つかりませんでした。")
+            else:
+                _alt_labels = [f"{a['現場']}（空き{a['空き人数']:g}人）" for a in _alts]
+                # 本人が意思表示している現場があれば、それを初期選択にする
+                _default_idx = 0
+                for _i, a in enumerate(_alts):
+                    if a["現場"] == _transfer_wish:
+                        _default_idx = _i
+                        break
+                _alt_choice = st.selectbox(
+                    "振替先の候補", _alt_labels, index=_default_idx,
+                    key=f"pool_alt_{prow['wish_id']}")
+                _chosen_site = _alts[_alt_labels.index(_alt_choice)]["現場"]
+                if st.button(
+                        f"↔️ {_chosen_site}へ振り替えて確定する",
+                        key=f"pool_confirm_{prow['wish_id']}"):
+                    append_confirmed({
+                        "shift_id": prow["wish_id"],
+                        "氏名": prow["氏名"],
+                        "line_user_id": prow.get("line_user_id", ""),
+                        "現場": _chosen_site,
+                        "日付": prow["希望日"],
+                        "開始": prow["開始"],
+                        "終了": prow["終了"],
+                        "マッチング方法": "振替あっせん",
+                        "確定日時": "",
+                    })
+                    update_wish_status(prow["wish_id"], "マッチ済", _chosen_site)
+                    _ok, _msg = send_confirmation(
+                        prow.get("line_user_id", ""),
+                        f"シフトが確定しました（振替）。\n"
+                        f"{prow['希望日']} {prow['開始']}〜{prow['終了']}\n"
+                        f"現場：{_chosen_site}\n"
+                        f"（第1希望の{prow['第1希望現場']}は満席のため、"
+                        f"近くの現場にご案内しました）")
+                    st.success(f"{prow['氏名']}さんを{_chosen_site}へ振り替えました。{_msg}")
+                    st.rerun()
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
