@@ -742,12 +742,35 @@ else:
                     st.caption(
                         "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
                         "その座席の申請者が分かるようになっています。")
-                    st.dataframe(_seat_list, hide_index=True, width="stretch")
-                    _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        "📥 座席リストのCSVをダウンロード", _seat_list_csv,
-                        file_name=f"座席リスト_{datetime.now():%Y%m%d}.csv",
-                        mime="text/csv", key="seat_list_csv")
+
+                    _seat_tab1, _seat_tab2 = st.tabs(
+                        ["📋 縦長形式", "🎲 マトリクス形式（1座席1行・47時間帯）"])
+
+                    with _seat_tab1:
+                        st.dataframe(_seat_list, hide_index=True, width="stretch")
+                        _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
+                        st.download_button(
+                            "📥 座席リストのCSVをダウンロード（縦長形式）", _seat_list_csv,
+                            file_name=f"座席リスト_縦長_{datetime.now():%Y%m%d}.csv",
+                            mime="text/csv", key="seat_list_csv")
+
+                    with _seat_tab2:
+                        st.caption(
+                            "現場・日付・座席番号を1行として、横に0〜47時間帯を"
+                            "並べたマトリクスです。マスの中身は、その時間帯に"
+                            "その座席へ入っている人の氏名です（空席は空欄）。")
+                        _seat_matrix = _seat_list.pivot_table(
+                            index=["現場名", "日付", "座席番号"], columns="時間帯",
+                            values="氏名", aggfunc="first", fill_value="").reset_index()
+                        _seat_matrix.columns = [
+                            str(c) if isinstance(c, str) else f"{c}時"
+                            for c in _seat_matrix.columns]
+                        st.dataframe(_seat_matrix, hide_index=True, width="stretch")
+                        _seat_matrix_csv = _seat_matrix.to_csv(index=False).encode("utf-8-sig")
+                        st.download_button(
+                            "📥 座席リストのCSVをダウンロード（マトリクス形式）", _seat_matrix_csv,
+                            file_name=f"座席リスト_マトリクス_{datetime.now():%Y%m%d}.csv",
+                            mime="text/csv", key="seat_matrix_csv")
 
 st.markdown("---")
 st.header("📋 マッチング候補の確認")
