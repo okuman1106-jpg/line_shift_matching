@@ -84,6 +84,7 @@ def _save_demo(name, df):
     df.to_csv(_demo_path(name), index=False)
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def load_wishes():
     if is_live_mode():
         ws = _get_sheet("希望")
@@ -96,6 +97,7 @@ def load_wishes():
     return _load_demo("希望", WISH_COLUMNS)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_sites():
     if is_live_mode():
         ws = _get_sheet("現場マスタ")
@@ -108,6 +110,7 @@ def load_sites():
     return _load_demo("現場マスタ", SITE_COLUMNS)
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def load_confirmed():
     if is_live_mode():
         ws = _get_sheet("確定シフト")
@@ -132,6 +135,7 @@ def update_wish_status(wish_id, status, match_site=""):
             match_col = header.index("マッチ現場") + 1
             ws.update_cell(row, status_col, status)
             ws.update_cell(row, match_col, match_site)
+        load_wishes.clear()
         return
 
     df = _load_demo("希望", WISH_COLUMNS)
@@ -142,6 +146,7 @@ def update_wish_status(wish_id, status, match_site=""):
         df.loc[idx, "ステータス"] = status
         df.loc[idx, "マッチ現場"] = match_site
         _save_demo("希望", df)
+    load_wishes.clear()
 
 
 def append_confirmed(row: dict):
@@ -149,12 +154,14 @@ def append_confirmed(row: dict):
     if is_live_mode():
         ws = _get_sheet("確定シフト")
         ws.append_row([row.get(c, "") for c in CONFIRMED_COLUMNS])
+        load_confirmed.clear()
         return
 
     df = _load_demo("確定シフト", CONFIRMED_COLUMNS)
     new_row = pd.DataFrame([{c: row.get(c, "") for c in CONFIRMED_COLUMNS}])
     df = pd.concat([df, new_row], ignore_index=True)
     _save_demo("確定シフト", df)
+    load_confirmed.clear()
 
 
 @st.cache_data(ttl=10, show_spinner=False)
