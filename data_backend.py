@@ -23,6 +23,9 @@ WISH_COLUMNS = ["wish_id", "line_user_id", "氏名", "希望日", "開始", "終
 SITE_COLUMNS = ["現場名", "エリア"]
 CONFIRMED_COLUMNS = ["shift_id", "氏名", "line_user_id", "現場", "日付",
                      "開始", "終了", "マッチング方法", "確定日時"]
+# 「基準パターン」＝実績データから作る、現場ごとの時間帯別お手本ダイス。
+# 時間帯は0〜47の通し番号（日またぎ対応）、基準人数は頭数（小数）。
+REFERENCE_COLUMNS = ["現場", "時間帯", "基準人数", "作成日時"]
 
 
 def is_live_mode():
@@ -140,6 +143,59 @@ def append_confirmed(row: dict):
     new_row = pd.DataFrame([{c: row.get(c, "") for c in CONFIRMED_COLUMNS}])
     df = pd.concat([df, new_row], ignore_index=True)
     _save_demo("確定シフト", df)
+
+
+def load_reference():
+    """現場ごとの、時間帯別お手本ダイス（基準パターン）を読み込む。"""
+    if is_live_mode():
+        try:
+            ws = _get_sheet("基準パターン")
+        except Exception:
+            return pd.DataFrame(columns=REFERENCE_COLUMNS)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records, dtype=str) if records else pd.DataFrame(columns=REFERENCE_COLUMNS)
+        for c in REFERENCE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[REFERENCE_COLUMNS]
+    return _load_demo("基準パターン", REFERENCE_COLUMNS)
+
+
+def save_reference(site, hour_pattern, now_str):
+    """
+    1つの現場について、48時間帯分の基準人数をまとめて保存する。
+    同じ現場の既存データは削除してから、新しい内容で置き換える
+    （「直近の実績をそのまま使う」方式のため、洗い替えでよい）。
+    hour_pattern … {時間帯(int): 基準人数(float)} の辞書
+    """
+    new_rows = pd.DataFrame([
+        {"現場": site, "時間帯": str(h), "基準人数": f"{v:.2f}", "作成日時": now_str}
+        for h, v in hour_pattern.items() if v > 0
+    ], dtype=str)
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("基準パターン")
+        except Exception:
+            return False
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=REFERENCE_COLUMNS)
+        for c in REFERENCE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[df["現場"] != site]
+        df = pd.concat([df, new_rows], ignore_index=True)
+        ws.clear()
+        ws.append_row(REFERENCE_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[REFERENCE_COLUMNS].values.tolist())
+        return True
+
+    df = _load_demo("基準パターン", REFERENCE_COLUMNS)
+    df = df[df["現場"] != site]
+    df = pd.concat([df, new_rows], ignore_index=True)
+    _save_demo("基準パターン", df)
+    return True
 
 
 def seed_demo_data():
