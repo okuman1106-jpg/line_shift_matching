@@ -31,7 +31,7 @@ import streamlit as st
 from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, update_wish_field, append_confirmed, seed_demo_data,
-    load_reference, save_reference, save_reference_bulk,
+    load_reference, save_reference, save_reference_bulk, save_reference_full,
     load_aliases, add_alias, delete_alias,
     load_staff_wages, save_staff_wage, delete_staff_wage,
 )
@@ -44,6 +44,7 @@ from matching import (
     normalize_site_name, find_unmatched_site_names,
     compute_labor_cost, compute_labor_cost_precise, get_wage_for,
     find_pool_wishes, suggest_alternative_slots, build_seat_diff,
+    renormalize_reference_sites,
 )
 from line_notify import send_confirmation, send_pool_alternatives
 
@@ -1273,3 +1274,23 @@ with st.expander("🔤 現場名エイリアスの管理"):
                         st.success(
                             f"「{row['表記ゆれ']}」→「{_new_target}」に修正しました。")
                         st.rerun()
+
+    st.markdown("---")
+    st.caption(
+        "エイリアスを後から登録した場合、それより前に保存された「基準"
+        "パターン」は、古い（表記ゆれのままの）現場名で残ってしまって"
+        "います。下のボタンで、今のエイリアス対応表を使って、既存の"
+        "お手本データの現場名をまとめて正規化し直せます。")
+    if st.button("🧹 既存の基準パターンの現場名を、今のエイリアスで正規化し直す",
+                  key="renormalize_reference_btn"):
+        _reference_df_all_fix = load_reference()
+        _fixed_df, _n_changed = renormalize_reference_sites(
+            _reference_df_all_fix, _alias_df_view)
+        if _n_changed == 0:
+            st.info("正規化が必要なデータはありませんでした。")
+        else:
+            save_reference_full(_fixed_df)
+            st.success(
+                f"✅ {_n_changed} 行の現場名を正規化しました"
+                f"（正規化後の合計：{len(_fixed_df)} 行）。")
+            st.rerun()
