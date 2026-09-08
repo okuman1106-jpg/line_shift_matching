@@ -1343,36 +1343,48 @@ else:
                             _seat_list["現場名"].isin(_matrix_site_filter)] \
                             if _matrix_site_filter else _seat_list
 
+                        # 「氏名」だけをピボットすると、実際にはその現場・座席に
+                        # 存在しない時間帯（他の現場の時間帯が列に混ざって
+                        # くることで生まれる列）まで、あとで「空席」と表示して
+                        # しまう。そこで、「そのマスに座席が本当に存在するか」を
+                        # 別途ピボットして、行ごとに正確に判定する。
+                        _exists_matrix = _matrix_source.assign(_exists=1).pivot_table(
+                            index=["現場名", "日付", "座席番号"], columns="時間帯",
+                            values="_exists", aggfunc="max", fill_value=0)
                         _seat_matrix = _matrix_source.pivot_table(
                             index=["現場名", "日付", "座席番号"], columns="時間帯",
-                            values="氏名", aggfunc="first", fill_value="").reset_index()
-                        # 選ばれた現場にとって無関係な時間帯の列は表示から外す。
-                        # 「セルの中身が空かどうか」ではなく「その時間帯に座席が
-                        # そもそも存在するか」で判定する（誰も予約していない
-                        # だけの空席は、ここで消してしまってはいけない）。
-                        _relevant_hours = set(_matrix_source["時間帯"].unique())
+                            values="氏名", aggfunc="first", fill_value="")
+                        # 両方とも同じ index（現場名・日付・座席番号）を持つので、
+                        # 位置ではなくindexで正しく突き合わせる。
+                        _exists_matrix = _exists_matrix.reindex(
+                            columns=_seat_matrix.columns, fill_value=0)
+
+                        for _c in _seat_matrix.columns:
+                            _seat_matrix[_c] = [
+                                (name if str(name).strip()
+                                 else ("空席" if exists else ""))
+                                for name, exists in zip(
+                                    _seat_matrix[_c], _exists_matrix[_c])
+                            ]
+
+                        _seat_matrix = _seat_matrix.reset_index()
+                        # どの現場にとっても座席が1つも無い列（表示している
+                        # 現場すべてで空欄のままの列）だけを、最後に取り除く。
                         _hour_cols_in_matrix = [
                             c for c in _seat_matrix.columns
                             if c not in ("現場名", "日付", "座席番号")]
-                        _irrelevant_cols = [
-                            c for c in _hour_cols_in_matrix if c not in _relevant_hours]
-                        _seat_matrix = _seat_matrix.drop(columns=_irrelevant_cols)
-                        # 座席は存在するが、まだ誰も割り当てられていないマスは、
-                        # 完全な空欄のままだと「そもそも座席が無い」ように見えて
-                        # 紛らわしいため、「空席」という文字を入れておく。
-                        _remaining_hour_cols = [
-                            c for c in _seat_matrix.columns
-                            if c not in ("現場名", "日付", "座席番号")]
-                        for _c in _remaining_hour_cols:
-                            _seat_matrix[_c] = _seat_matrix[_c].apply(
-                                lambda v: v if str(v).strip() else "空席")
+                        _all_empty_cols = [
+                            c for c in _hour_cols_in_matrix
+                            if (_seat_matrix[c] == "").all()]
+                        _seat_matrix = _seat_matrix.drop(columns=_all_empty_cols)
                         _seat_matrix.columns = [
                             str(c) if isinstance(c, str) else f"{c}時"
                             for c in _seat_matrix.columns]
                         st.caption(
                             f"表示中：{len(_seat_matrix)} 座席ぶん。"
                             "「空席」は座席が存在するが未割当、氏名が入っていれば"
-                            "その人が確定または希望中であることを示します。")
+                            "その人が確定または希望中であることを示します。"
+                            "座席がそもそも存在しない時間帯は空欄のままです。")
                         st.dataframe(_seat_matrix, hide_index=True, width="stretch")
                         _seat_matrix_csv = _seat_matrix.to_csv(index=False).encode("utf-8-sig")
                         st.download_button(
