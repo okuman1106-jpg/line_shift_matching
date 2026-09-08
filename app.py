@@ -46,7 +46,7 @@ from matching import (
     compute_labor_cost, compute_labor_cost_precise, get_wage_for,
     find_pool_wishes, suggest_alternative_slots, build_seat_diff,
     renormalize_reference_sites, extract_daily_hourly_matrix,
-    build_weekday_hourly_matrix,
+    build_weekday_hourly_matrix, classify_dice_shape,
 )
 from matching import _WEEKDAY_ORDER as _WEEKDAY_ORDER_APP
 from line_notify import send_confirmation, send_pool_alternatives
@@ -1038,6 +1038,33 @@ else:
                                     columns={c: f"{c}時" for c in _cols_b}),
                                 width="stretch")
 
+                        if _cmp_mode.startswith("曜日") and (not _table_a.empty or not _table_b.empty):
+                            st.markdown("###### 🔺 曜日ごとの形（山型・ロート型・二峰型・変則型）")
+                            st.caption(
+                                "前の特許用アプリで人手で分類していた4タイプを、"
+                                "山（極大点）の数と幅から自動判定したものです。"
+                                "目安としてお使いください。")
+                            _shape_rows = []
+                            for _wd in _WEEKDAY_ORDER_APP:
+                                _row_data = {"曜日": _wd}
+                                if not _table_a.empty and _wd in _table_a.index:
+                                    _shape_a, _ = classify_dice_shape(
+                                        list(_table_a.loc[_wd].values))
+                                    _row_data["期間Aの形"] = _shape_a
+                                else:
+                                    _row_data["期間Aの形"] = "－"
+                                if not _table_b.empty and _wd in _table_b.index:
+                                    _shape_b, _ = classify_dice_shape(
+                                        list(_table_b.loc[_wd].values))
+                                    _row_data["期間Bの形"] = _shape_b
+                                else:
+                                    _row_data["期間Bの形"] = "－"
+                                if _row_data["期間Aの形"] != "－" or _row_data["期間Bの形"] != "－":
+                                    _shape_rows.append(_row_data)
+                            if _shape_rows:
+                                st.dataframe(
+                                    pd.DataFrame(_shape_rows), hide_index=True, width="stretch")
+
                         if _cmp_mode.startswith("曜日") and not _table_a.empty and not _table_b.empty:
                             st.markdown("###### 🔴🔵 椅子（人数）の増減：期間B − 期間A")
                             st.caption(
@@ -1217,6 +1244,21 @@ else:
             st.write(
                 f"現在の保存状況：**{_n_sites} 現場 × {_n_periods} 期間** "
                 f"（{', '.join(_periods_list) if _periods_list else '期間未設定のものを含む'}）")
+
+            st.markdown("###### 📊 現場×期間ごとの合計人数（総計）")
+            st.caption(
+                "1日ぶんの延べ人数（全時間帯の合計）です。まずはここで"
+                "期間ごとの増減をざっと見て、気になる現場・期間があれば"
+                "下の詳細表やマトリクスで細かく確認するのが早いです。")
+            _totals_src = _export_reference_df.copy()
+            _totals_src["基準人数"] = pd.to_numeric(
+                _totals_src["基準人数"], errors="coerce").fillna(0.0)
+            _totals_df = (
+                _totals_src.groupby(["現場", "対象期間"])["基準人数"]
+                .sum().round(2).reset_index()
+                .rename(columns={"基準人数": "合計人数"})
+                .sort_values(["現場", "対象期間"]))
+            st.dataframe(_totals_df, hide_index=True, width="stretch")
 
             _export_tab1, _export_tab2 = st.tabs(
                 ["📋 縦長形式（全件）", "🎲 マトリクス形式（現場×期間を1行・47時間帯）"])
