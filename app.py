@@ -43,7 +43,7 @@ from matching import (
     generate_seat_list, annotate_seat_list_with_occupancy,
     normalize_site_name, find_unmatched_site_names,
     compute_labor_cost, compute_labor_cost_precise, get_wage_for,
-    find_pool_wishes, suggest_alternative_slots,
+    find_pool_wishes, suggest_alternative_slots, build_seat_diff,
 )
 from line_notify import send_confirmation, send_pool_alternatives
 
@@ -321,6 +321,70 @@ def render_seat_grid_html(seat_counts, occupancy, hours):
     return "".join(parts)
 
 
+def render_seat_diff_html(diff_list, hours):
+    """
+    「お手本の座席数」と「実際の確定人数」の差分を、1時間ごとに
+    色分けして表示する。
+      赤（濃いほど差が大きい）… お手本より増員
+      青（濃いほど差が大きい）… お手本より欠員
+      白                     … お手本どおり
+    """
+    def esc(v):
+        return html_lib.escape(str(v))
+
+    def fmt(v):
+        if v == 0:
+            return "±0"
+        sign = "+" if v > 0 else ""
+        return f"{sign}{v:g}"
+
+    def diff_bg(v):
+        if v > 0:
+            shade = min(1.0, v / 3.0)
+            return f"rgba(220,60,60,{0.15 + shade * 0.55:.2f})"
+        elif v < 0:
+            shade = min(1.0, abs(v) / 3.0)
+            return f"rgba(60,100,220,{0.15 + shade * 0.55:.2f})"
+        return "#ffffff"
+
+    def hour_label(h):
+        return f"{h % 24}時" + ("+1" if h >= 24 else "")
+
+    parts = ['<div style="overflow-x:auto;">'
+             '<table style="border-collapse:collapse;font-size:12px;">']
+    parts.append('<tr><th style="border:1px solid #ddd;padding:4px 6px;'
+                 'background:#f5f5f5;text-align:left;">時間帯</th>')
+    for h in hours:
+        parts.append(f'<th style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#f5f5f5;white-space:nowrap;">{esc(hour_label(h))}</th>')
+    parts.append('</tr>')
+
+    for row_key in ["お手本", "確定", "増減"]:
+        parts.append(f'<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                     f'background:#fafafa;font-weight:bold;white-space:nowrap;">'
+                     f'{esc(row_key)}</td>')
+        for h in hours:
+            if row_key == "増減":
+                v = diff_list[h]["差分"]
+                bg = diff_bg(v)
+                text = fmt(v)
+            else:
+                v = diff_list[h][row_key]
+                bg = "#ffffff"
+                text = "" if not v else (str(int(v)) if v == int(v) else f"{v:g}")
+            parts.append(f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                         f'text-align:center;background:{bg};">{text}</td>')
+        parts.append('</tr>')
+
+    parts.append('</table></div>')
+    parts.append(
+        '<p style="font-size:12px;color:#666;margin-top:8px;">'
+        '<span style="color:#c0392b;">赤</span>＝お手本より増員、'
+        '<span style="color:#2255cc;">青</span>＝お手本より欠員。'
+        '色が濃いほど差が大きいことを示します。</p>')
+    return "".join(parts)
+
+
 def render_alias_helper(raw_names, sites_df, aliases_df, key_prefix):
     """
     アップロードされたデータの現場名のうち、現場マスタに無いもの
@@ -587,6 +651,27 @@ else:
                 _seat_hours = list(range(6, 24))
             st.markdown(
                 render_seat_grid_html(_seat_counts, _occupancy, _seat_hours),
+                unsafe_allow_html=True)
+
+        with st.expander("🔴🔵 お手本との増減表", expanded=False):
+            st.caption(
+                "お手本ダイスの人数と、実際に確定した人数を1時間ごとに"
+                "比べます。お手本より人が増えたマスは赤、減った"
+                "（欠員のままの）マスは青で表示します。")
+            _c_heads_for_diff, _, _, _ = build_hour_breakdown(
+                confirmed_df, wishes_df, _drill_site, _drill_date)
+            _diff_list = build_seat_diff(_ref_heads, _c_heads_for_diff)
+            _diff_active_hours = [
+                h for h in range(48)
+                if _diff_list[h]["お手本"] > 0 or _diff_list[h]["確定"] > 0]
+            if _diff_active_hours:
+                _dlo = max(0, min(_diff_active_hours) - 2)
+                _dhi = min(47, max(_diff_active_hours) + 2)
+                _diff_hours = list(range(_dlo, _dhi + 1))
+            else:
+                _diff_hours = list(range(6, 24))
+            st.markdown(
+                render_seat_diff_html(_diff_list, _diff_hours),
                 unsafe_allow_html=True)
 
         _wish_rows = [r for r in _dice_rows if r["種別"] == "希望"]
