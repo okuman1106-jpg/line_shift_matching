@@ -292,6 +292,38 @@ def save_reference_bulk(patterns: dict, now_str: str, period: str = ""):
     return len(target_sites)
 
 
+def save_reference_full(df: pd.DataFrame):
+    """
+    「基準パターン」シートの中身を、渡されたDataFrameの内容で完全に
+    置き換える（部分更新ではなく、全件洗い替え）。現場名の一括正規化
+    など、「表全体を書き直したい」場合に使う。save_reference_bulk()の
+    ような部分更新（対象の現場・対象期間だけ差し替え）だと、正規化前の
+    古い現場名の行が「対象外」として残ってしまうため、この関数では
+    それを避けて全部を書き直す。
+    """
+    df = df.copy()
+    for c in REFERENCE_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[REFERENCE_COLUMNS]
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("基準パターン")
+        except Exception:
+            return False
+        ws.clear()
+        ws.append_row(REFERENCE_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df.values.tolist())
+        load_reference.clear()
+        return True
+
+    _save_demo("基準パターン", df)
+    load_reference.clear()
+    return True
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def load_aliases():
     """現場名の表記ゆれ対応表（表記ゆれ → 正式名）を読み込む。"""
