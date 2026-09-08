@@ -489,7 +489,6 @@ if is_approver:
 
 st.markdown("---")
 st.header("📊 現場×日付の盤面")
-st.caption("今日から2週間分の、現場ごとの確定・希望状況を一覧できます。")
 
 _board_days = st.slider("表示する日数", 7, 30, 14, key="board_days")
 labels, counts, pendings = build_board(wishes_df, confirmed_df, sites_df, days_ahead=_board_days)
@@ -497,7 +496,20 @@ labels, counts, pendings = build_board(wishes_df, confirmed_df, sites_df, days_a
 if sites_df.empty:
     st.info("現場マスタに現場が登録されていません。")
 else:
-    st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
+    st.markdown("###### 📈 日別の予約総数（確定＋希望の合計）")
+    st.caption("全現場を合計した、その日1日ぶんの人数です。多い日ほど、パンクしやすい日と言えます。")
+    _daily_totals = (counts + pendings).sum(axis=0)
+    _daily_summary = pd.DataFrame({
+        "日付": _daily_totals.index,
+        "確定": counts.sum(axis=0).values,
+        "希望": pendings.sum(axis=0).values,
+        "合計": _daily_totals.values,
+    })
+    st.dataframe(_daily_summary, hide_index=True, width="stretch")
+
+    with st.expander("📋 現場ごとの内訳（全現場×全日付）", expanded=False):
+        st.caption("今日から指定した日数ぶんの、現場ごとの確定・希望状況を一覧できます。")
+        st.markdown(render_board_html(labels, counts, pendings), unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("#### 📆 1日を選んで、全現場×47時間帯で見る")
