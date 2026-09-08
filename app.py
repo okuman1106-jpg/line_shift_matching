@@ -1285,112 +1285,123 @@ else:
                 _reference_df_all = load_reference()
                 _seat_list = generate_seat_list(_reference_df_all, _target_dates)
                 if _seat_list.empty:
+                    st.session_state["generated_seat_list"] = None
                     st.warning(
                         "座席が1件も生成されませんでした。お手本ダイスが"
                         "登録されているか確認してください。")
                 else:
                     _seat_list = annotate_seat_list_with_occupancy(
                         _seat_list, _reference_df_all, confirmed_df, wishes_df)
-                    _n_filled = int((_seat_list["状態"] != "空席").sum())
-                    st.success(
-                        f"✅ {len(_target_dates)} 日ぶん・{_seat_list['現場名'].nunique()} "
-                        f"現場ぶん、合計 {len(_seat_list)} 席を生成しました"
-                        f"（うち {_n_filled} 席に申請者がいます）。")
-                    st.caption(
-                        "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
-                        "その座席の申請者が分かるようになっています。")
+                    # ボタンは押した瞬間の1回しか反応しないため、結果は
+                    # session_stateに保存しておく。こうしないと、下の
+                    # 「表示する現場」プルダウンを操作しただけで画面が
+                    # 再読み込みされ、せっかく生成した結果が消えてしまう。
+                    st.session_state["generated_seat_list"] = _seat_list
+                    st.session_state["generated_seat_dates"] = _target_dates
 
-                    _seat_tab1, _seat_tab2 = st.tabs(
-                        ["📋 縦長形式", "🎲 マトリクス形式（1座席1行・47時間帯）"])
+        if st.session_state.get("generated_seat_list") is not None:
+            _seat_list = st.session_state["generated_seat_list"]
+            _target_dates = st.session_state.get("generated_seat_dates", [])
+            _n_filled = int((_seat_list["状態"] != "空席").sum())
+            st.success(
+                f"✅ {len(_target_dates)} 日ぶん・{_seat_list['現場名'].nunique()} "
+                f"現場ぶん、合計 {len(_seat_list)} 席を生成しました"
+                f"（うち {_n_filled} 席に申請者がいます）。")
+            st.caption(
+                "「氏名」「状態」の列で、確定前（希望）でも確定後でも、"
+                "その座席の申請者が分かるようになっています。")
 
-                    with _seat_tab1:
-                        st.markdown("###### 現場ごとの集計")
-                        _seat_summary = (
-                            _seat_list.assign(
-                                is_空席=lambda d: d["状態"] == "空席",
-                                is_希望=lambda d: d["状態"].isin(["希望", "希望(超過)"]),
-                                is_確定=lambda d: d["状態"] == "確定")
-                            .groupby("現場名")
-                            .agg(総座席数=("座席ID", "count"),
-                                 空席数=("is_空席", "sum"),
-                                 希望数=("is_希望", "sum"),
-                                 確定数=("is_確定", "sum"))
-                            .reset_index()
-                            .sort_values("現場名"))
-                        st.dataframe(_seat_summary, hide_index=True, width="stretch")
+            _seat_tab1, _seat_tab2 = st.tabs(
+                ["📋 縦長形式", "🎲 マトリクス形式（1座席1行・47時間帯）"])
 
-                        st.markdown("###### 座席1件ずつの詳細")
-                        st.dataframe(_seat_list, hide_index=True, width="stretch")
-                        _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
-                        st.download_button(
-                            "📥 座席リストのCSVをダウンロード（縦長形式）", _seat_list_csv,
-                            file_name=f"座席リスト_縦長_{datetime.now():%Y%m%d}.csv",
-                            mime="text/csv", key="seat_list_csv")
+            with _seat_tab1:
+                st.markdown("###### 現場ごとの集計")
+                _seat_summary = (
+                    _seat_list.assign(
+                        is_空席=lambda d: d["状態"] == "空席",
+                        is_希望=lambda d: d["状態"].isin(["希望", "希望(超過)"]),
+                        is_確定=lambda d: d["状態"] == "確定")
+                    .groupby("現場名")
+                    .agg(総座席数=("座席ID", "count"),
+                         空席数=("is_空席", "sum"),
+                         希望数=("is_希望", "sum"),
+                         確定数=("is_確定", "sum"))
+                    .reset_index()
+                    .sort_values("現場名"))
+                st.dataframe(_seat_summary, hide_index=True, width="stretch")
 
-                    with _seat_tab2:
-                        st.caption(
-                            "現場・日付・座席番号を1行として、横に時間帯を並べた"
-                            "マトリクスです。マスの中身は、その時間帯にその座席へ"
-                            "入っている人の氏名です（空席は空欄）。複数の現場を"
-                            "一度に表示すると、営業時間帯が違う現場同士で"
-                            "無関係な列が空欄だらけになって見づらいため、"
-                            "現場を選んで表示します。")
-                        _matrix_sites = sorted(_seat_list["現場名"].unique())
-                        _matrix_site_filter = st.multiselect(
-                            "表示する現場（未選択なら全現場）", _matrix_sites,
-                            key="seat_matrix_site_filter")
-                        _matrix_source = _seat_list[
-                            _seat_list["現場名"].isin(_matrix_site_filter)] \
-                            if _matrix_site_filter else _seat_list
+                st.markdown("###### 座席1件ずつの詳細")
+                st.dataframe(_seat_list, hide_index=True, width="stretch")
+                _seat_list_csv = _seat_list.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 座席リストのCSVをダウンロード（縦長形式）", _seat_list_csv,
+                    file_name=f"座席リスト_縦長_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="seat_list_csv")
 
-                        # 「氏名」だけをピボットすると、実際にはその現場・座席に
-                        # 存在しない時間帯（他の現場の時間帯が列に混ざって
-                        # くることで生まれる列）まで、あとで「空席」と表示して
-                        # しまう。そこで、「そのマスに座席が本当に存在するか」を
-                        # 別途ピボットして、行ごとに正確に判定する。
-                        _exists_matrix = _matrix_source.assign(_exists=1).pivot_table(
-                            index=["現場名", "日付", "座席番号"], columns="時間帯",
-                            values="_exists", aggfunc="max", fill_value=0)
-                        _seat_matrix = _matrix_source.pivot_table(
-                            index=["現場名", "日付", "座席番号"], columns="時間帯",
-                            values="氏名", aggfunc="first", fill_value="")
-                        # 両方とも同じ index（現場名・日付・座席番号）を持つので、
-                        # 位置ではなくindexで正しく突き合わせる。
-                        _exists_matrix = _exists_matrix.reindex(
-                            columns=_seat_matrix.columns, fill_value=0)
+            with _seat_tab2:
+                st.caption(
+                    "現場・日付・座席番号を1行として、横に時間帯を並べた"
+                    "マトリクスです。マスの中身は、その時間帯にその座席へ"
+                    "入っている人の氏名です（空席は空欄）。複数の現場を"
+                    "一度に表示すると、営業時間帯が違う現場同士で"
+                    "無関係な列が空欄だらけになって見づらいため、"
+                    "現場を選んで表示します。")
+                _matrix_sites = sorted(_seat_list["現場名"].unique())
+                _matrix_site_filter = st.multiselect(
+                    "表示する現場（未選択なら全現場）", _matrix_sites,
+                    key="seat_matrix_site_filter")
+                _matrix_source = _seat_list[
+                    _seat_list["現場名"].isin(_matrix_site_filter)] \
+                    if _matrix_site_filter else _seat_list
 
-                        for _c in _seat_matrix.columns:
-                            _seat_matrix[_c] = [
-                                (name if str(name).strip()
-                                 else ("空席" if exists else ""))
-                                for name, exists in zip(
-                                    _seat_matrix[_c], _exists_matrix[_c])
-                            ]
+                # 「氏名」だけをピボットすると、実際にはその現場・座席に
+                # 存在しない時間帯（他の現場の時間帯が列に混ざって
+                # くることで生まれる列）まで、あとで「空席」と表示して
+                # しまう。そこで、「そのマスに座席が本当に存在するか」を
+                # 別途ピボットして、行ごとに正確に判定する。
+                _exists_matrix = _matrix_source.assign(_exists=1).pivot_table(
+                    index=["現場名", "日付", "座席番号"], columns="時間帯",
+                    values="_exists", aggfunc="max", fill_value=0)
+                _seat_matrix = _matrix_source.pivot_table(
+                    index=["現場名", "日付", "座席番号"], columns="時間帯",
+                    values="氏名", aggfunc="first", fill_value="")
+                # 両方とも同じ index（現場名・日付・座席番号）を持つので、
+                # 位置ではなくindexで正しく突き合わせる。
+                _exists_matrix = _exists_matrix.reindex(
+                    columns=_seat_matrix.columns, fill_value=0)
 
-                        _seat_matrix = _seat_matrix.reset_index()
-                        # どの現場にとっても座席が1つも無い列（表示している
-                        # 現場すべてで空欄のままの列）だけを、最後に取り除く。
-                        _hour_cols_in_matrix = [
-                            c for c in _seat_matrix.columns
-                            if c not in ("現場名", "日付", "座席番号")]
-                        _all_empty_cols = [
-                            c for c in _hour_cols_in_matrix
-                            if (_seat_matrix[c] == "").all()]
-                        _seat_matrix = _seat_matrix.drop(columns=_all_empty_cols)
-                        _seat_matrix.columns = [
-                            str(c) if isinstance(c, str) else f"{c}時"
-                            for c in _seat_matrix.columns]
-                        st.caption(
-                            f"表示中：{len(_seat_matrix)} 座席ぶん。"
-                            "「空席」は座席が存在するが未割当、氏名が入っていれば"
-                            "その人が確定または希望中であることを示します。"
-                            "座席がそもそも存在しない時間帯は空欄のままです。")
-                        st.dataframe(_seat_matrix, hide_index=True, width="stretch")
-                        _seat_matrix_csv = _seat_matrix.to_csv(index=False).encode("utf-8-sig")
-                        st.download_button(
-                            "📥 座席リストのCSVをダウンロード（マトリクス形式）", _seat_matrix_csv,
-                            file_name=f"座席リスト_マトリクス_{datetime.now():%Y%m%d}.csv",
-                            mime="text/csv", key="seat_matrix_csv")
+                for _c in _seat_matrix.columns:
+                    _seat_matrix[_c] = [
+                        (name if str(name).strip()
+                         else ("空席" if exists else ""))
+                        for name, exists in zip(
+                            _seat_matrix[_c], _exists_matrix[_c])
+                    ]
+
+                _seat_matrix = _seat_matrix.reset_index()
+                # どの現場にとっても座席が1つも無い列（表示している
+                # 現場すべてで空欄のままの列）だけを、最後に取り除く。
+                _hour_cols_in_matrix = [
+                    c for c in _seat_matrix.columns
+                    if c not in ("現場名", "日付", "座席番号")]
+                _all_empty_cols = [
+                    c for c in _hour_cols_in_matrix
+                    if (_seat_matrix[c] == "").all()]
+                _seat_matrix = _seat_matrix.drop(columns=_all_empty_cols)
+                _seat_matrix.columns = [
+                    str(c) if isinstance(c, str) else f"{c}時"
+                    for c in _seat_matrix.columns]
+                st.caption(
+                    f"表示中：{len(_seat_matrix)} 座席ぶん。"
+                    "「空席」は座席が存在するが未割当、氏名が入っていれば"
+                    "その人が確定または希望中であることを示します。"
+                    "座席がそもそも存在しない時間帯は空欄のままです。")
+                st.dataframe(_seat_matrix, hide_index=True, width="stretch")
+                _seat_matrix_csv = _seat_matrix.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 座席リストのCSVをダウンロード（マトリクス形式）", _seat_matrix_csv,
+                    file_name=f"座席リスト_マトリクス_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="seat_matrix_csv")
 
 st.markdown("---")
 st.header("🏊 プール要員一覧（席が埋まって確定できていない希望者）")
