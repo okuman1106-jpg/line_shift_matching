@@ -1006,3 +1006,76 @@ def renormalize_reference_sites(reference_df: pd.DataFrame, aliases_df: pd.DataF
     df = df.drop_duplicates(subset=["現場", "時間帯", "対象期間"], keep="first")
     df = df.sort_values(["現場", "対象期間", "時間帯"])
     return df, changed
+
+
+def extract_daily_hourly_matrix(long_df: pd.DataFrame, site: str):
+    """
+    縦長形式（現場名・日付・時間帯・頭数の4列）のデータから、指定した
+    現場の「日付 × 時間帯」の表を作る。「お手本」のように月平均に
+    均さず、日ごとの実際の値をそのまま残す。
+
+    戻り値：pandas.DataFrame（index=日付、columns=0〜47の時間帯の整数、
+    値=頭数）。該当データが無ければ空のDataFrameを返す。
+    """
+    if long_df.empty:
+        return pd.DataFrame()
+    sub = long_df[long_df["現場名"] == site]
+    if sub.empty:
+        return pd.DataFrame()
+
+    sub = sub.copy()
+    sub["時間帯"] = sub["時間帯"].astype(int)
+    sub["頭数"] = pd.to_numeric(sub["頭数"], errors="coerce").fillna(0)
+
+    pivot = sub.pivot_table(
+        index="日付", columns="時間帯", values="頭数", aggfunc="sum", fill_value=0)
+    pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+    pivot = pivot.sort_index()
+    return pivot
+
+
+_WEEKDAY_ORDER = ["月", "火", "水", "木", "金", "土", "日"]
+_WEEKDAY_MAP = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
+
+
+def build_weekday_hourly_matrix(long_df: pd.DataFrame, site: str):
+    """
+    縦長形式のデータから、指定した現場の「曜日 × 時間帯」の表を作る。
+    特定の日付どうしを比べる（例：2025-02-01 と 2026-02-01）と、
+    曜日が違うために単純比較しづらいことがあるため、同じ期間内の
+    同じ曜日を平均してからそろえる。
+
+    例えば「月曜日」の行は、その期間中に含まれるすべての月曜日の
+    平均人数になる。
+
+    戻り値：pandas.DataFrame（index=曜日（月〜日の順）、
+    columns=0〜47の時間帯、値=平均頭数）
+    """
+    if long_df.empty:
+        return pd.DataFrame()
+    sub = long_df[long_df["現場名"] == site]
+    if sub.empty:
+        return pd.DataFrame()
+
+    sub = sub.copy()
+    sub["時間帯"] = sub["時間帯"].astype(int)
+    sub["頭数"] = pd.to_numeric(sub["頭数"], errors="coerce").fillna(0)
+    _parsed_dates = pd.to_datetime(sub["日付"], errors="coerce")
+    sub["曜日"] = _parsed_dates.dt.dayofweek.map(_WEEKDAY_MAP)
+    sub = sub.dropna(subset=["曜日"])
+    if sub.empty:
+        return pd.DataFrame()
+
+    # 曜日ごとに「何日ぶんのデータがあるか」を数え、時間帯ごとの合計を
+    # その日数で割って平均にする（例：月曜が期間中に4回あれば4で割る）。
+    n_days_per_weekday = (
+        sub[["曜日", "日付"]].drop_duplicates().groupby("曜日").size())
+
+    pivot_sum = sub.pivot_table(
+        index="曜日", columns="時間帯", values="頭数", aggfunc="sum", fill_value=0)
+    pivot_avg = pivot_sum.div(n_days_per_weekday, axis=0)
+
+    pivot_avg = pivot_avg.reindex(
+        [w for w in _WEEKDAY_ORDER if w in pivot_avg.index])
+    pivot_avg = pivot_avg.reindex(sorted(pivot_avg.columns), axis=1)
+    return pivot_avg.round(2)
