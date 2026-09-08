@@ -324,6 +324,65 @@ def save_reference_full(df: pd.DataFrame):
     return True
 
 
+def save_reference_multi_period(entries: list, now_str: str):
+    """
+    複数の「現場・対象期間・パターン」の組み合わせを、1回の読み書きで
+    まとめて保存する。例えば「1ヶ月ぶんの日々のダイスを、日付ごとに
+    別々の対象期間として全部保存したい」場合、日数ぶんsave_reference_bulk
+    を繰り返し呼ぶと、日数だけ通信が発生してGoogle側の利用制限に
+    かかりやすい。この関数は、既存データの読み込みを1回、書き込みを
+    1回だけで済ませる。
+
+    entries … [(現場名, 対象期間, {時間帯(int): 基準人数(float)}), ...]
+    戻り値：保存した組み合わせの数
+    """
+    new_rows_list = []
+    target_keys = set()
+    for site, period, hour_pattern in entries:
+        target_keys.add((site, period))
+        for h, v in hour_pattern.items():
+            if v > 0:
+                new_rows_list.append({
+                    "現場": site, "時間帯": str(h),
+                    "基準人数": f"{v:.2f}", "対象期間": period,
+                    "作成日時": now_str,
+                })
+    new_rows = pd.DataFrame(new_rows_list, dtype=str)
+
+    def _is_target(row_site, row_period):
+        return (row_site, row_period) in target_keys
+
+    if is_live_mode():
+        try:
+            ws = _get_sheet("基準パターン")
+        except Exception:
+            return 0
+        existing = ws.get_all_records()
+        df = pd.DataFrame(existing, dtype=str) if existing else pd.DataFrame(columns=REFERENCE_COLUMNS)
+        for c in REFERENCE_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        _mask = df.apply(lambda r: _is_target(r["現場"], r.get("対象期間", "")), axis=1) \
+            if not df.empty else pd.Series([], dtype=bool)
+        df = df[~_mask] if not df.empty else df
+        df = pd.concat([df, new_rows], ignore_index=True)
+        ws.clear()
+        ws.append_row(REFERENCE_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df[REFERENCE_COLUMNS].values.tolist())
+        load_reference.clear()
+        return len(target_keys)
+
+    df = _load_demo("基準パターン", REFERENCE_COLUMNS)
+    _mask = df.apply(lambda r: _is_target(r["現場"], r.get("対象期間", "")), axis=1) \
+        if not df.empty else pd.Series([], dtype=bool)
+    df = df[~_mask] if not df.empty else df
+    df = pd.concat([df, new_rows], ignore_index=True)
+    _save_demo("基準パターン", df)
+    load_reference.clear()
+    return len(target_keys)
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def load_aliases():
     """現場名の表記ゆれ対応表（表記ゆれ → 正式名）を読み込む。"""
