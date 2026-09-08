@@ -32,6 +32,7 @@ from data_backend import (
     is_live_mode, load_wishes, load_sites, load_confirmed,
     update_wish_status, update_wish_field, append_confirmed, seed_demo_data,
     load_reference, save_reference, save_reference_bulk, save_reference_full,
+    save_reference_multi_period,
     load_aliases, add_alias, delete_alias,
     load_staff_wages, save_staff_wage, delete_staff_wage,
 )
@@ -44,14 +45,41 @@ from matching import (
     normalize_site_name, find_unmatched_site_names,
     compute_labor_cost, compute_labor_cost_precise, get_wage_for,
     find_pool_wishes, suggest_alternative_slots, build_seat_diff,
-    renormalize_reference_sites,
+    renormalize_reference_sites, extract_daily_hourly_matrix,
+    build_weekday_hourly_matrix,
 )
+from matching import _WEEKDAY_ORDER as _WEEKDAY_ORDER_APP
 from line_notify import send_confirmation, send_pool_alternatives
 
 
 def guess_col(cols, cands):
     """列名の一覧から、候補キーワードを含む最初の列を推測する。"""
     return next((c for c in cols if any(k in c for k in cands)), None)
+
+
+def parse_actual_csv_flexible(file):
+    """
+    お手本ダイス用の縦長形式（現場名・日付・時間帯・頭数）、または
+    マトリクス形式（現場名・日付・0時・1時…）のどちらのCSVでも読み込み、
+    縦長形式のDataFrameに揃えて返す。どちらの形式でもなければNoneを返す。
+    """
+    try:
+        raw = pd.read_csv(file, encoding="utf-8-sig", dtype=str)
+    except UnicodeDecodeError:
+        file.seek(0)
+        raw = pd.read_csv(file, encoding="cp932", dtype=str)
+    cols = list(raw.columns)
+    hcols = [c for c in cols if re.match(r"^\d{1,2}時$", c)]
+    if {"現場名", "日付", "時間帯", "頭数"}.issubset(set(cols)):
+        return raw
+    if {"現場名", "日付"}.issubset(set(cols)) and hcols:
+        melted = raw.melt(
+            id_vars=["現場名", "日付"], value_vars=hcols,
+            var_name="時間帯", value_name="頭数")
+        melted["時間帯"] = melted["時間帯"].str.replace("時", "", regex=False)
+        melted["頭数"] = pd.to_numeric(melted["頭数"], errors="coerce").fillna(0)
+        return melted[melted["頭数"] > 0]
+    return None
 
 
 def render_hourly_html(confirmed_heads, pending_heads, confirmed_names, pending_names,
@@ -938,6 +966,286 @@ else:
                             width="stretch")
                     else:
                         st.info("選んだ期間には、まだ数値が入っていません。")
+
+    with st.expander("📅 日付×時間帯で実績を比較する（日別の細かい表）"):
+        st.caption(
+            "上の「お手本を見比べる」は月平均に均した数字ですが、こちらは"
+            "均さず、日付ごとの実際の人数をそのまま比較できます。前の"
+            "特許用アプリの「📤 お手本ダイス用データの書き出し」で作った"
+            "CSV（縦長形式・マトリクス形式どちらでも可）を、比較したい"
+            "期間ぶん2つアップロードしてください。")
+
+        _cmp_c1, _cmp_c2 = st.columns(2)
+        _cmp_file_a = _cmp_c1.file_uploader(
+            "期間A用CSV（例：2025年2月）", type=["csv"], key="daily_cmp_file_a")
+        _cmp_file_b = _cmp_c2.file_uploader(
+            "期間B用CSV（例：2026年2月）", type=["csv"], key="daily_cmp_file_b")
+
+        if _cmp_file_a and _cmp_file_b:
+            _long_a = parse_actual_csv_flexible(_cmp_file_a)
+            _long_b = parse_actual_csv_flexible(_cmp_file_b)
+            if _long_a is None or _long_b is None:
+                st.error(
+                    "CSVの形式を認識できませんでした。前の特許用アプリの"
+                    "書き出し機能で作ったCSVをそのまま使ってください。")
+            else:
+                _cmp_sites = sorted(
+                    set(_long_a["現場名"].dropna().unique())
+                    | set(_long_b["現場名"].dropna().unique()))
+                _cmp_site = st.selectbox(
+                    "比較する現場を選択", _cmp_sites, key="daily_cmp_site")
+                _cmp_mode = st.radio(
+                    "比較のそろえ方",
+                    ["曜日でそろえる（同じ曜日どうしの平均を比較・推奨）",
+                     "日付そのままで比較する"],
+                    key="daily_cmp_mode",
+                    help="例えば「2025-02-01」と「2026-02-01」は曜日が"
+                         "違うことが多く、単純に並べると人数の増減が"
+                         "曜日の違いによるものなのか、本当の需要の変化"
+                         "なのか区別しにくくなります。「曜日でそろえる」"
+                         "を選ぶと、期間内の同じ曜日どうしを平均して"
+                         "比較するので、この影響を受けにくくなります。")
+
+                if _cmp_site:
+                    if _cmp_mode.startswith("曜日"):
+                        _table_a = build_weekday_hourly_matrix(_long_a, _cmp_site)
+                        _table_b = build_weekday_hourly_matrix(_long_b, _cmp_site)
+                        _row_label = "曜日"
+                    else:
+                        _table_a = extract_daily_hourly_matrix(_long_a, _cmp_site)
+                        _table_b = extract_daily_hourly_matrix(_long_b, _cmp_site)
+                        _row_label = "日付"
+
+                    if _table_a.empty and _table_b.empty:
+                        st.info("この現場のデータが、どちらのCSVにもありません。")
+                    else:
+                        st.markdown("###### 📘 期間A")
+                        if _table_a.empty:
+                            st.caption("この現場のデータがありません。")
+                        else:
+                            _cols_a = [c for c in _table_a.columns if _table_a[c].sum() > 0]
+                            st.dataframe(
+                                _table_a[_cols_a].rename(
+                                    columns={c: f"{c}時" for c in _cols_a}),
+                                width="stretch")
+                        st.markdown("###### 📗 期間B")
+                        if _table_b.empty:
+                            st.caption("この現場のデータがありません。")
+                        else:
+                            _cols_b = [c for c in _table_b.columns if _table_b[c].sum() > 0]
+                            st.dataframe(
+                                _table_b[_cols_b].rename(
+                                    columns={c: f"{c}時" for c in _cols_b}),
+                                width="stretch")
+
+                        if _cmp_mode.startswith("曜日") and not _table_a.empty and not _table_b.empty:
+                            st.markdown("###### 🔴🔵 椅子（人数）の増減：期間B − 期間A")
+                            st.caption(
+                                "同じ曜日・同じ時間帯どうしで、期間Bが期間Aより"
+                                "何人分増減しているかを示します。"
+                                "赤＝増加、青＝減少、色が濃いほど差が大きいことを示します。")
+                            _all_weekdays = [w for w in _WEEKDAY_ORDER_APP
+                                             if w in _table_a.index or w in _table_b.index]
+                            _all_hours_diff = sorted(
+                                set(_table_a.columns) | set(_table_b.columns))
+                            _diff_rows_html = []
+                            for _wd in _all_weekdays:
+                                _va = _table_a.loc[_wd] if _wd in _table_a.index else None
+                                _vb = _table_b.loc[_wd] if _wd in _table_b.index else None
+                                _row = {}
+                                for _h in _all_hours_diff:
+                                    _av = float(_va[_h]) if _va is not None and _h in _va.index else 0.0
+                                    _bv = float(_vb[_h]) if _vb is not None and _h in _vb.index else 0.0
+                                    _row[_h] = round(_bv - _av, 2)
+                                _diff_rows_html.append((_wd, _row))
+
+                            _diff_active_hours = [
+                                h for h in _all_hours_diff
+                                if any(abs(row[h]) > 0 for _, row in _diff_rows_html)]
+                            if not _diff_active_hours:
+                                st.info("差分がある時間帯がありませんでした。")
+                            else:
+                                _diff_html_parts = [
+                                    '<div style="overflow-x:auto;">'
+                                    '<table style="border-collapse:collapse;font-size:12px;">'
+                                    '<tr><th style="border:1px solid #ddd;padding:4px 6px;'
+                                    'background:#f5f5f5;text-align:left;">曜日</th>']
+                                for _h in _diff_active_hours:
+                                    _diff_html_parts.append(
+                                        f'<th style="border:1px solid #ddd;padding:4px 6px;'
+                                        f'background:#f5f5f5;white-space:nowrap;">{_h}時</th>')
+                                _diff_html_parts.append('</tr>')
+
+                                def _diff_bg_app(v):
+                                    if v > 0:
+                                        shade = min(1.0, v / 3.0)
+                                        return f"rgba(220,60,60,{0.15 + shade * 0.55:.2f})"
+                                    elif v < 0:
+                                        shade = min(1.0, abs(v) / 3.0)
+                                        return f"rgba(60,100,220,{0.15 + shade * 0.55:.2f})"
+                                    return "#ffffff"
+
+                                for _wd, _row in _diff_rows_html:
+                                    _diff_html_parts.append(
+                                        f'<tr><td style="border:1px solid #ddd;padding:4px 6px;'
+                                        f'background:#fafafa;font-weight:bold;">{_wd}</td>')
+                                    for _h in _diff_active_hours:
+                                        _v = _row[_h]
+                                        _bg = _diff_bg_app(_v)
+                                        _text = "±0" if _v == 0 else f"{'+' if _v > 0 else ''}{_v:g}"
+                                        _diff_html_parts.append(
+                                            f'<td style="border:1px solid #ddd;padding:4px 6px;'
+                                            f'text-align:center;background:{_bg};">{_text}</td>')
+                                    _diff_html_parts.append('</tr>')
+                                _diff_html_parts.append('</table></div>')
+                                st.markdown("".join(_diff_html_parts), unsafe_allow_html=True)
+
+    with st.expander("🏋️ 一番「筋肉質」な日を選んで、お手本にする"):
+        st.caption(
+            "平均で均すと、無駄の多い日と少ない日が混ざって薄まって"
+            "しまいます。ここでは、実際にあった日々のダイスをそのまま"
+            "一覧にし、合計人数が少ない順（＝スタッフの力量で効率よく"
+            "回せていた可能性がある順）に並べます。「この日が理想的な"
+            "配置だった」という日を選べば、その日の時間帯別の人数を"
+            "そのままお手本として保存できます（平均をとりません）。")
+
+        _muscle_file = st.file_uploader(
+            "実績CSV（縦長形式・マトリクス形式どちらでも可）",
+            type=["csv"], key="muscle_upload")
+        if _muscle_file:
+            _muscle_long = parse_actual_csv_flexible(_muscle_file)
+            if _muscle_long is None:
+                st.error(
+                    "CSVの形式を認識できませんでした。前の特許用アプリの"
+                    "書き出し機能で作ったCSVをそのまま使ってください。")
+            else:
+                _muscle_sites = sorted(_muscle_long["現場名"].dropna().unique())
+                _muscle_site = st.selectbox(
+                    "現場を選択", _muscle_sites, key="muscle_site")
+                if _muscle_site:
+                    _muscle_table = extract_daily_hourly_matrix(_muscle_long, _muscle_site)
+                    if _muscle_table.empty:
+                        st.info("この現場のデータがありません。")
+                    else:
+                        _daily_ranking = _muscle_table.sum(axis=1).sort_values()
+                        _ranking_df = pd.DataFrame({
+                            "日付": _daily_ranking.index,
+                            "その日の延べ人数": _daily_ranking.values,
+                        })
+                        st.caption("延べ人数が少ない日ほど上に来ます（筋肉質な日の候補）。")
+                        st.dataframe(_ranking_df, hide_index=True, width="stretch")
+
+                        _picked_date = st.selectbox(
+                            "お手本にしたい日を選ぶ", list(_daily_ranking.index),
+                            key="muscle_picked_date")
+                        if _picked_date:
+                            _picked_row = _muscle_table.loc[_picked_date]
+                            _picked_cols = [c for c in _picked_row.index if _picked_row[c] > 0]
+                            st.markdown(f"###### {_picked_date} の時間帯別の人数")
+                            st.dataframe(
+                                pd.DataFrame(
+                                    [_picked_row[_picked_cols].values],
+                                    columns=[f"{c}時" for c in _picked_cols],
+                                    index=[_muscle_site]),
+                                width="stretch")
+
+                            _muscle_period_label = st.text_input(
+                                "この内容を保存するときの対象期間ラベル",
+                                value=str(_picked_date), key="muscle_period_label",
+                                help="例えばそのまま日付にしておけば「この日を選んだ"
+                                     "お手本」として区別できます。他の期間ラベルと"
+                                     "同じ名前にすると、上書きされます。")
+                            if st.button(
+                                    f"🏋️ {_picked_date} のパターンをお手本として保存する",
+                                    key="muscle_save_btn"):
+                                _picked_pattern = {
+                                    int(c): float(_picked_row[c]) for c in _picked_cols}
+                                _now_s = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                save_reference_bulk(
+                                    {_muscle_site: _picked_pattern}, _now_s,
+                                    period=_muscle_period_label.strip())
+                                st.success(
+                                    f"✅ {_picked_date} のパターンを、対象期間"
+                                    f"「{_muscle_period_label.strip()}」として保存しました。")
+                                st.rerun()
+
+                        st.markdown("---")
+                        st.caption(
+                            "経験のあるユニット長でないと、変則的な需要に合わせた"
+                            "ダイスは組めません。今、人手不足で「穴埋めだけ」に"
+                            "なってしまっている現場も多いと思います。1日だけ"
+                            "選んで保存するのではなく、**この現場のすべての日**を、"
+                            "日付ごとに個別のお手本として一括保存しておけば、"
+                            "経験の浅い人でも「過去の実際の配置例」を後から"
+                            "参照できるようになります（平均はとりません。"
+                            "日ごとの実際の値がそのまま残ります）。")
+                        if st.button(
+                                f"💾 {_muscle_site} の全日程（{len(_muscle_table)}日ぶん）を、"
+                                "日付ごとに個別保存する",
+                                key="muscle_save_all_btn"):
+                            _entries = []
+                            for _d in _muscle_table.index:
+                                _row = _muscle_table.loc[_d]
+                                _cols_d = [c for c in _row.index if _row[c] > 0]
+                                if not _cols_d:
+                                    continue
+                                _pattern_d = {int(c): float(_row[c]) for c in _cols_d}
+                                _entries.append((_muscle_site, str(_d), _pattern_d))
+                            _now_s2 = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            _n_saved = save_reference_multi_period(_entries, _now_s2)
+                            st.success(
+                                f"✅ {_muscle_site} の {_n_saved} 日ぶんを、"
+                                "それぞれ個別の対象期間として保存しました。"
+                                "「📈 期間ごとのお手本を見比べる」で、実際の"
+                                "日付を選んで参照できます。")
+                            st.rerun()
+
+    with st.expander("📤 保存済みのお手本ダイス（全期間・全現場）を書き出す"):
+        st.caption(
+            "毎月お手本を取り込んでいけば、通年12ヶ月ぶん・全現場ぶんの"
+            "お手本がここに蓄積されていきます。ここでは、今保存されている"
+            "すべての現場・すべての対象期間（例：2025-01〜2025-12）を"
+            "まとめて1つのファイルとして書き出せます。記録の保存や、"
+            "他のシステムでの活用にお使いください。")
+        _export_reference_df = load_reference()
+        if _export_reference_df.empty:
+            st.info("まだお手本が1件も保存されていません。")
+        else:
+            _n_sites = _export_reference_df["現場"].nunique()
+            _n_periods = _export_reference_df["対象期間"].nunique()
+            _periods_list = sorted(_export_reference_df["対象期間"].dropna().unique())
+            st.write(
+                f"現在の保存状況：**{_n_sites} 現場 × {_n_periods} 期間** "
+                f"（{', '.join(_periods_list) if _periods_list else '期間未設定のものを含む'}）")
+
+            _export_tab1, _export_tab2 = st.tabs(
+                ["📋 縦長形式（全件）", "🎲 マトリクス形式（現場×期間を1行・47時間帯）"])
+
+            with _export_tab1:
+                st.dataframe(_export_reference_df, hide_index=True, width="stretch")
+                _export_csv_long = _export_reference_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 縦長形式でダウンロード（全期間・全現場）", _export_csv_long,
+                    file_name=f"お手本ダイス_通年_縦長_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="export_all_ref_long")
+
+            with _export_tab2:
+                _export_src = _export_reference_df.copy()
+                _export_src["時間帯"] = _export_src["時間帯"].astype(int)
+                _export_src["基準人数"] = pd.to_numeric(
+                    _export_src["基準人数"], errors="coerce").fillna(0.0)
+                _export_matrix = _export_src.pivot_table(
+                    index=["現場", "対象期間"], columns="時間帯", values="基準人数",
+                    fill_value=0.0, aggfunc="first").reset_index()
+                _export_matrix.columns = [
+                    str(c) if isinstance(c, str) else f"{c}時"
+                    for c in _export_matrix.columns]
+                st.dataframe(_export_matrix, hide_index=True, width="stretch")
+                _export_csv_matrix = _export_matrix.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 マトリクス形式でダウンロード（現場×期間を1行）", _export_csv_matrix,
+                    file_name=f"お手本ダイス_通年_マトリクス_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv", key="export_all_ref_matrix")
 
     with st.expander("🪑 座席番号の一括生成"):
         st.caption(
