@@ -1079,3 +1079,84 @@ def build_weekday_hourly_matrix(long_df: pd.DataFrame, site: str):
         [w for w in _WEEKDAY_ORDER if w in pivot_avg.index])
     pivot_avg = pivot_avg.reindex(sorted(pivot_avg.columns), axis=1)
     return pivot_avg.round(2)
+
+
+def _find_peaks(values, prominence_ratio=0.15):
+    """
+    数値の並びから、山（極大点）の位置を探す。前後の値より高く、かつ
+    全体のばらつき（最大値と最小値の差）に対して一定以上目立つ
+    （prominence_ratio）山だけを数える。小さなガタつきをノイズとして
+    無視するための処理。頂上が横ばい（同じ値が連続するプラトー）の
+    場合も、1つの山としてまとめて検出する。
+    """
+    if len(values) < 3:
+        return []
+    vmax, vmin = max(values), min(values)
+    threshold = (vmax - vmin) * prominence_ratio
+    if threshold <= 0:
+        return []
+
+    # 連続する同じ値を1つの「かたまり（ラン）」にまとめる。
+    # runs は (値, 開始位置) のリスト。
+    runs = []
+    for i, v in enumerate(values):
+        if runs and runs[-1][0] == v:
+            continue
+        runs.append((v, i))
+
+    peaks = []
+    for r in range(1, len(runs) - 1):
+        v, idx = runs[r]
+        prev_v = runs[r - 1][0]
+        next_v = runs[r + 1][0]
+        if v > prev_v and v > next_v:
+            left_min = min(values[max(0, idx - 3):idx]) if idx > 0 else v
+            right_bound = runs[r + 1][1]
+            right_min = min(values[right_bound:right_bound + 3]) if right_bound < len(values) else v
+            prominence = v - max(left_min, right_min)
+            if prominence >= threshold:
+                peaks.append(idx)
+    return peaks
+
+
+def classify_dice_shape(values):
+    """
+    47時間帯（の一部でもよい）の人数の並びから、ダイスの形を
+    「山型」「ロート型」「二峰型」「変則型」の4つに自動分類する。
+    前の特許用アプリで人手で分類していたものを、簡易的な
+    山（極大点）の検出ロジックで再現したもの。
+
+      山型　　… 山が1つで、幅が狭い（鋭いピーク）
+      ロート型 … 山が1つだが、幅が広い（なだらかに続くピーク）
+      二峰型　… 山が2つ
+      変則型　… 山が0または3つ以上、あるいは判定不能なほどデータが少ない
+
+    values … 時間帯順に並んだ人数のリスト（0の時間帯を含んでいてもよい）
+    戻り値：(分類名, 説明文)
+    """
+    active = [v for v in values if v > 0]
+    if len(active) < 3:
+        return "変則型", "データが少なく、形を判定できません。"
+
+    peaks = _find_peaks(values)
+    n_peaks = len(peaks)
+
+    if n_peaks == 0:
+        return "変則型", "はっきりした山が見つかりませんでした（平坦、または単調な増減）。"
+    if n_peaks >= 3:
+        return "変則型", f"山が{n_peaks}つあり、複雑な形をしています。"
+    if n_peaks == 2:
+        return "二峰型", "山が2つあります（例：ランチとディナーのように、離れた時間帯にピークが分かれるタイプ）。"
+
+    # 山が1つ → 山型かロート型かを、ピークの「幅」で判定する。
+    peak_idx = peaks[0]
+    peak_val = values[peak_idx]
+    vmax, vmin = max(values), min(values)
+    # ピークの8割以上の高さを保っている時間帯の数を、ピークの「幅」とする。
+    plateau_threshold = vmin + (vmax - vmin) * 0.8
+    plateau_width = sum(1 for v in values if v >= plateau_threshold)
+    active_span = len(active)
+
+    if active_span > 0 and (plateau_width / active_span) >= 0.35:
+        return "ロート型", "山は1つですが、なだらかに長く続くタイプです。"
+    return "山型", "山が1つで、鋭く盛り上がるタイプです。"
