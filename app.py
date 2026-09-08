@@ -1357,9 +1357,22 @@ else:
                         _irrelevant_cols = [
                             c for c in _hour_cols_in_matrix if c not in _relevant_hours]
                         _seat_matrix = _seat_matrix.drop(columns=_irrelevant_cols)
+                        # 座席は存在するが、まだ誰も割り当てられていないマスは、
+                        # 完全な空欄のままだと「そもそも座席が無い」ように見えて
+                        # 紛らわしいため、「空席」という文字を入れておく。
+                        _remaining_hour_cols = [
+                            c for c in _seat_matrix.columns
+                            if c not in ("現場名", "日付", "座席番号")]
+                        for _c in _remaining_hour_cols:
+                            _seat_matrix[_c] = _seat_matrix[_c].apply(
+                                lambda v: v if str(v).strip() else "空席")
                         _seat_matrix.columns = [
                             str(c) if isinstance(c, str) else f"{c}時"
                             for c in _seat_matrix.columns]
+                        st.caption(
+                            f"表示中：{len(_seat_matrix)} 座席ぶん。"
+                            "「空席」は座席が存在するが未割当、氏名が入っていれば"
+                            "その人が確定または希望中であることを示します。")
                         st.dataframe(_seat_matrix, hide_index=True, width="stretch")
                         _seat_matrix_csv = _seat_matrix.to_csv(index=False).encode("utf-8-sig")
                         st.download_button(
@@ -1582,6 +1595,29 @@ with st.expander("🔤 現場名エイリアスの管理"):
                         st.success(
                             f"「{row['表記ゆれ']}」→「{_new_target}」に修正しました。")
                         st.rerun()
+
+    st.markdown("---")
+    st.markdown("###### ➕ 新しく表記ゆれを登録する")
+    st.caption(
+        "実績データの取り込み時に警告から登録する以外に、ここから直接、"
+        "手動でも登録できます。")
+    _new_alias_c1, _new_alias_c2, _new_alias_c3 = st.columns([2, 2, 1])
+    _new_alias_variant = _new_alias_c1.text_input(
+        "表記ゆれ（実際に来る方の名前）", key="new_alias_variant")
+    _new_alias_site_options = list(sites_df["現場名"]) if not sites_df.empty else []
+    _new_alias_target = _new_alias_c2.selectbox(
+        "正式名（現場マスタの名前）", _new_alias_site_options,
+        key="new_alias_target") if _new_alias_site_options else None
+    if _new_alias_c3.button("➕ 登録する", key="new_alias_add_btn"):
+        if not _new_alias_variant.strip():
+            st.warning("表記ゆれの欄が空欄です。")
+        elif not _new_alias_target:
+            st.warning("現場マスタに現場が登録されていません。")
+        else:
+            if add_alias(_new_alias_variant, _new_alias_target):
+                st.success(
+                    f"「{_new_alias_variant.strip()}」→「{_new_alias_target}」を登録しました。")
+                st.rerun()
 
     st.markdown("---")
     st.caption(
