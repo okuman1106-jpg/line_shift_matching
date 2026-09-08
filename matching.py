@@ -952,3 +952,26 @@ def suggest_alternative_slots(wish_row, sites_df: pd.DataFrame,
 
     candidates.sort(key=lambda x: -x["空き人数"])
     return candidates
+
+
+def build_seat_diff(reference_heads, confirmed_heads):
+    """
+    「お手本の座席数」と「実際に確定した人数」を、48時間帯ぶん
+    比べて差分を出す。
+
+    差分がプラス（お手本より増えた＝増員）なら赤、
+    マイナス（お手本より減った＝欠員）なら青、で色分けする想定。
+
+    戻り値：48要素のリスト。各要素は
+      {"お手本": int, "確定": float, "差分": float}
+    """
+    result = []
+    for h in range(48):
+        ref = round(reference_heads[h])
+        conf = confirmed_heads[h]
+        result.append({
+            "お手本": ref,
+            "確定": conf,
+            "差分": round(conf - ref, 2),
+        })
+    return result
