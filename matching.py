@@ -975,3 +975,34 @@ def build_seat_diff(reference_heads, confirmed_heads):
             "差分": round(conf - ref, 2),
         })
     return result
+
+
+def renormalize_reference_sites(reference_df: pd.DataFrame, aliases_df: pd.DataFrame):
+    """
+    すでに保存済みの「基準パターン」の現場名を、今のエイリアス対応表で
+    正規化し直す。エイリアス登録が後から行われた場合、それより前に
+    保存されたデータは古い（表記ゆれのままの）現場名で残ってしまって
+    いるため、これをまとめて直す。
+
+    同じ「正規化後の現場・時間帯・対象期間」が複数存在する場合は、
+    作成日時が一番新しいものだけを残す（重複統合）。
+
+    戻り値：(正規化後のDataFrame, 実際に名前が変わった件数)
+    """
+    if reference_df.empty:
+        return reference_df, 0
+
+    df = reference_df.copy()
+    original_sites = df["現場"].copy()
+    df["現場"] = df["現場"].apply(lambda n: normalize_site_name(n, aliases_df))
+    changed = int((df["現場"] != original_sites).sum())
+
+    if changed == 0:
+        return reference_df, 0
+
+    # 正規化後に重複する行（同じ現場・時間帯・対象期間）は、作成日時が
+    # 新しい方だけを残す。
+    df = df.sort_values("作成日時", ascending=False)
+    df = df.drop_duplicates(subset=["現場", "時間帯", "対象期間"], keep="first")
+    df = df.sort_values(["現場", "対象期間", "時間帯"])
+    return df, changed
