@@ -92,7 +92,7 @@ def _save_demo(name, df):
     df.to_csv(_demo_path(name), index=False)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_wishes():
     if is_live_mode():
         ws = _get_sheet("希望")
@@ -105,7 +105,7 @@ def load_wishes():
     return _load_demo("希望", WISH_COLUMNS)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_sites():
     if is_live_mode():
         ws = _get_sheet("現場マスタ")
@@ -118,7 +118,7 @@ def load_sites():
     return _load_demo("現場マスタ", SITE_COLUMNS)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_confirmed():
     if is_live_mode():
         ws = _get_sheet("確定シフト")
@@ -202,7 +202,7 @@ def append_confirmed(row: dict):
     load_confirmed.clear()
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_reference():
     """現場ごとの、時間帯別お手本ダイス（基準パターン）を読み込む。"""
     if is_live_mode():
@@ -383,7 +383,7 @@ def save_reference_multi_period(entries: list, now_str: str):
     return len(target_keys)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_aliases():
     """現場名の表記ゆれ対応表（表記ゆれ → 正式名）を読み込む。"""
     if is_live_mode():
@@ -470,7 +470,7 @@ def delete_alias(variant: str):
     return True
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_staff_wages():
     """スタッフごとの優遇時給の一覧を読み込む（載っていない人は現場の基本時給を使う）。"""
     if is_live_mode():
